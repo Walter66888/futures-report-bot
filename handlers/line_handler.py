@@ -106,49 +106,72 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
     """
     try:
         text = event.message.text.strip()
+        reply_token = event.reply_token
+        
+        logger.info(f"收到訊息: {text}, reply_token: {reply_token}")
         
         # 取得用戶ID
         if event.source.type == 'user':
             user_id = event.source.user_id
             target_id = user_id  # 私人訊息回覆
             is_private = True
+            logger.info(f"從用戶 {user_id} 收到私人訊息")
         elif event.source.type == 'group':
             group_id = event.source.group_id
             target_id = group_id  # 群組訊息回覆
             is_private = False
+            logger.info(f"從群組 {group_id} 收到訊息")
         elif event.source.type == 'room':
             room_id = event.source.room_id
             target_id = room_id  # 聊天室訊息回覆
             is_private = False
+            logger.info(f"從聊天室 {room_id} 收到訊息")
         else:
             logger.warning(f"未知的訊息來源類型: {event.source.type}")
             return
         
         # 匹配管理員特殊命令 - 抓取歷史數據
         if text == ADMIN_FETCH_COMMAND and is_private:
+            logger.info(f"收到管理員特殊命令: {text}")
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(text="收到歷史數據抓取命令，即將開始執行...")
+            )
             start_historical_fetch(line_bot_api, target_id)
             return
         
         # 匹配查詢已抓取數據的命令
         if text == LIST_AVAILABLE_COMMAND:
+            logger.info(f"收到查詢可用報告列表命令: {text}")
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(text="正在查詢可用的報告列表，請稍候...")
+            )
             list_available_reports(line_bot_api, target_id)
             return
         
         # 匹配查詢爬取狀態的命令
         if text == CRAWL_STATUS_COMMAND and is_private:
+            logger.info(f"收到查詢爬取狀態命令: {text}")
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(text="正在獲取爬取狀態，請稍候...")
+            )
             show_crawl_status(line_bot_api, target_id)
             return
         
         # 處理密語指令 - 發送最新報告
         if is_secret_command or text == MAIN_SECRET_COMMAND:
+            logger.info(f"收到主密語命令: {text}")
             # 主密語 - 發送基本籌碼報告
-            send_latest_report(line_bot_api, target_id)
+            send_latest_report(line_bot_api, target_id, reply_token)
             return
         
         # 檢查是否為歷史日期查詢
         date_match = re.match(DATE_COMMAND_PATTERN, text)
         if date_match:
             date_str = date_match.group(1)  # 格式為 YYYYMMDD
+            logger.info(f"收到歷史日期查詢: {date_str}")
             try:
                 # 轉換為日期物件
                 year = int(date_str[:4])
@@ -158,15 +181,16 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
                 
                 # 檢查是否為有效的交易日
                 if not is_trading_day(query_date):
+                    logger.info(f"{date_str} 不是交易日")
                     line_bot_api.reply_message(
-                         event.reply_token,
+                        reply_token,
                         TextSendMessage(text=f"{query_date.strftime('%Y/%m/%d')} 不是交易日，無法查詢籌碼資料。")
                     )
                     return
                 
                 # 立即回覆，避免超時
                 line_bot_api.reply_message(
-                     event.reply_token,
+                    reply_token,
                     TextSendMessage(text=f"正在獲取 {query_date.strftime('%Y/%m/%d')} 的籌碼報告，請稍候...")
                 )
                 
@@ -178,9 +202,10 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
                 )
                 thread.start()
                 return
-            except ValueError:
+            except ValueError as e:
+                logger.error(f"日期格式解析錯誤: {str(e)}")
                 line_bot_api.reply_message(
-                     event.reply_token,
+                    reply_token,
                     TextSendMessage(text="日期格式錯誤，請使用「盤後籌碼-YYYYMMDD」格式查詢，例如：盤後籌碼-20250410")
                 )
                 return
@@ -190,6 +215,11 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
             # 檢查是否為專門的密語指令
             for cmd, report_type in COMMAND_MAPPING.items():
                 if cmd in text:
+                    logger.info(f"收到專門報告密語命令: {cmd}")
+                    line_bot_api.reply_message(
+                        reply_token,
+                        TextSendMessage(text=f"正在獲取{cmd}報告，請稍候...")
+                    )
                     send_specialized_report(line_bot_api, target_id, report_type)
                     return
                 
@@ -208,45 +238,60 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
             
             # 如果找到匹配的報告類型，發送對應的專門報告
             if matched_type:
+                logger.info(f"根據關鍵字匹配到報告類型: {matched_type}")
+                line_bot_api.reply_message(
+                    reply_token,
+                    TextSendMessage(text=f"正在獲取{COMMAND_MAPPING.get(matched_type, '籌碼')}報告，請稍候...")
+                )
                 send_specialized_report(line_bot_api, target_id, matched_type)
                 return
     
     except Exception as e:
-        logger.error(f"處理LINE訊息時出錯: {str(e)}")
+        logger.error(f"處理LINE訊息時出錯: {str(e)}", exc_info=True)
         try:
-            line_bot_api.push_message(
-                target_id,
+            line_bot_api.reply_message(
+                event.reply_token,
                 TextSendMessage(text="處理您的訊息時發生錯誤，請稍後再試。")
             )
-        except:
-            pass
+        except Exception as reply_error:
+            logger.error(f"回覆錯誤訊息時也失敗: {str(reply_error)}", exc_info=True)
 
-def send_latest_report(line_bot_api, target_id):
+def send_latest_report(line_bot_api, target_id, reply_token=None):
     """
     發送最新籌碼報告
     
     Args:
         line_bot_api: LINE Bot API實例
         target_id: 目標ID（用戶ID或群組ID）
+        reply_token: 回覆令牌，若提供則使用reply_message
     """
     try:
         # 獲取今日日期
         today = datetime.now(TW_TIMEZONE).strftime('%Y%m%d')
+        logger.info(f"嘗試獲取今日({today})報告")
         
         # 檢查快取中是否有今日報告
         if today in REPORT_CACHE and REPORT_CACHE[today].get('combined'):
             logger.info(f"使用快取的今日報告: {today}")
             report_text = generate_report_text(REPORT_CACHE[today]['combined'])
-            line_bot_api.push_message(
-                target_id,
-                TextSendMessage(text=report_text)
-            )
+            
+            if reply_token:
+                line_bot_api.reply_message(
+                    reply_token,
+                    TextSendMessage(text=report_text)
+                )
+            else:
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=report_text)
+                )
             return
         
         # 獲取最新報告數據
         report_data = get_latest_report_data()
         
         if not report_data:
+            logger.info("沒有最新報告數據")
             # 檢查是否有最近的報告
             available_dates = get_available_dates()
             recent_date = get_most_recent_date(available_dates)
@@ -267,32 +312,50 @@ def send_latest_report(line_bot_api, target_id):
                     "例如：盤後籌碼-20250410"
                 )
             
-            line_bot_api.push_message(
-                target_id,
-                TextSendMessage(text=message)
-            )
+            if reply_token:
+                line_bot_api.reply_message(
+                    reply_token,
+                    TextSendMessage(text=message)
+                )
+            else:
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=message)
+                )
             return
         
         # 生成報告文字
         report_text = generate_report_text(report_data)
         
         # 發送報告
-        line_bot_api.push_message(
-            target_id,
-            TextSendMessage(text=report_text)
-        )
+        if reply_token:
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(text=report_text)
+            )
+        else:
+            line_bot_api.push_message(
+                target_id,
+                TextSendMessage(text=report_text)
+            )
         
         logger.info(f"成功發送籌碼報告給目標: {target_id}")
     
     except Exception as e:
-        logger.error(f"發送籌碼報告時出錯: {str(e)}")
+        logger.error(f"發送籌碼報告時出錯: {str(e)}", exc_info=True)
         try:
-            line_bot_api.push_message(
-                target_id,
-                TextSendMessage(text="發送報告時出錯，請稍後再試。")
-            )
-        except:
-            pass
+            if reply_token:
+                line_bot_api.reply_message(
+                    reply_token,
+                    TextSendMessage(text="發送報告時出錯，請稍後再試。錯誤詳情: " + str(e))
+                )
+            else:
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text="發送報告時出錯，請稍後再試。")
+                )
+        except Exception as send_error:
+            logger.error(f"發送錯誤訊息時也失敗: {str(send_error)}", exc_info=True)
 
 def send_date_report_async(line_bot_api, target_id, query_date):
     """
@@ -305,9 +368,11 @@ def send_date_report_async(line_bot_api, target_id, query_date):
     """
     try:
         date_str = query_date.strftime('%Y%m%d')
+        logger.info(f"非同步處理日期 {date_str} 的報告查詢")
         
         # 檢查是否已經在處理同一日期
         if date_str in PROCESSING_DATES:
+            logger.info(f"日期 {date_str} 已有另一個請求正在處理")
             line_bot_api.push_message(
                 target_id,
                 TextSendMessage(text=f"已有另一個請求正在處理 {query_date.strftime('%Y/%m/%d')} 的報告，請稍候...")
@@ -322,16 +387,17 @@ def send_date_report_async(line_bot_api, target_id, query_date):
         finally:
             # 無論成功與否，都移除處理標記
             PROCESSING_DATES.remove(date_str)
+            logger.info(f"完成處理日期 {date_str} 的報告查詢")
     
     except Exception as e:
-        logger.error(f"非同步發送歷史籌碼報告時出錯: {str(e)}")
+        logger.error(f"非同步發送歷史籌碼報告時出錯: {str(e)}", exc_info=True)
         try:
             line_bot_api.push_message(
                 target_id,
-                TextSendMessage(text=f"處理 {query_date.strftime('%Y/%m/%d')} 的報告時出錯，請稍後再試。")
+                TextSendMessage(text=f"處理 {query_date.strftime('%Y/%m/%d')} 的報告時出錯，請稍後再試。錯誤詳情: {str(e)}")
             )
-        except:
-            pass
+        except Exception as push_error:
+            logger.error(f"嘗試發送錯誤訊息時也失敗: {str(push_error)}", exc_info=True)
 
 def send_date_report(line_bot_api, target_id, query_date):
     """
@@ -345,6 +411,7 @@ def send_date_report(line_bot_api, target_id, query_date):
     try:
         date_str = query_date.strftime('%Y%m%d')
         formatted_date = query_date.strftime('%Y/%m/%d')
+        logger.info(f"開始處理 {date_str} 的報告")
         
         # 檢查快取中是否有此日期的報告
         if date_str in REPORT_CACHE and REPORT_CACHE[date_str].get('combined'):
@@ -370,14 +437,17 @@ def send_date_report(line_bot_api, target_id, query_date):
         fubon_pdf_path = f"pdf_files/fubon_{date_str}.pdf"
         if os.path.exists(fubon_pdf_path):
             # 如果已存在，直接解析
+            logger.info(f"找到富邦報告文件: {fubon_pdf_path}")
             try:
                 fubon_data = extract_fubon_report_data(fubon_pdf_path)
                 if not fubon_data:
                     fubon_error = "解析PDF失敗"
+                    logger.error(f"解析富邦PDF失敗: {fubon_pdf_path}")
             except Exception as e:
                 fubon_error = str(e)
-                logger.error(f"解析富邦期貨 {date_str} 報告時出錯: {str(e)}")
+                logger.error(f"解析富邦期貨 {date_str} 報告時出錯: {str(e)}", exc_info=True)
         else:
+            logger.info(f"未找到富邦報告文件，嘗試下載: {fubon_pdf_path}")
             # 嘗試下載該日期的報告
             pdf_filename = f"TWPM_{year}.{month}.{day}.pdf"
             base_url = "https://www.fubon.com/futures/wcm/home/taiwanaferhours/image/taiwanaferhours/"
@@ -388,9 +458,11 @@ def send_date_report(line_bot_api, target_id, query_date):
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
+                logger.info(f"嘗試下載富邦報告: {pdf_url}")
                 response = requests.get(pdf_url, headers=headers, timeout=30)
                 
                 if response.status_code == 200 and response.headers.get('Content-Type', '').lower().startswith('application/pdf'):
+                    logger.info(f"成功獲取富邦報告，狀態碼: {response.status_code}")
                     # 確保目錄存在
                     os.makedirs("pdf_files", exist_ok=True)
                     
@@ -398,19 +470,23 @@ def send_date_report(line_bot_api, target_id, query_date):
                     with open(fubon_pdf_path, 'wb') as f:
                         f.write(response.content)
                     
+                    logger.info(f"富邦PDF保存成功: {fubon_pdf_path}")
+                    
                     # 解析數據
                     fubon_data = extract_fubon_report_data(fubon_pdf_path)
                     if not fubon_data:
                         fubon_error = "解析PDF失敗"
+                        logger.error(f"解析富邦PDF失敗: {fubon_pdf_path}")
                 else:
                     fubon_error = f"HTTP狀態碼: {response.status_code}"
+                    logger.warning(f"富邦報告下載失敗，狀態碼: {response.status_code}")
                     line_bot_api.push_message(
                         target_id,
                         TextSendMessage(text=f"無法從富邦期貨獲取 {formatted_date} 的報告 (狀態碼: {response.status_code})，嘗試其他來源...")
                     )
             except Exception as e:
                 fubon_error = str(e)
-                logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}")
+                logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}", exc_info=True)
                 line_bot_api.push_message(
                     target_id,
                     TextSendMessage(text=f"獲取富邦期貨 {formatted_date} 的報告時出錯，嘗試其他來源...")
@@ -422,14 +498,17 @@ def send_date_report(line_bot_api, target_id, query_date):
         sinopac_pdf_path = f"pdf_files/sinopac_{date_str}.pdf"
         if os.path.exists(sinopac_pdf_path):
             # 如果已存在，直接解析
+            logger.info(f"找到永豐報告文件: {sinopac_pdf_path}")
             try:
                 sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
                 if not sinopac_data:
                     sinopac_error = "解析PDF失敗"
+                    logger.error(f"解析永豐PDF失敗: {sinopac_pdf_path}")
             except Exception as e:
                 sinopac_error = str(e)
-                logger.error(f"解析永豐期貨 {date_str} 報告時出錯: {str(e)}")
+                logger.error(f"解析永豐期貨 {date_str} 報告時出錯: {str(e)}", exc_info=True)
         else:
+            logger.info(f"未找到永豐報告文件，嘗試下載: {sinopac_pdf_path}")
             # 嘗試從永豐網站下載歷史報告
             try:
                 from bs4 import BeautifulSoup
@@ -450,6 +529,7 @@ def send_date_report(line_bot_api, target_id, query_date):
                 }
                 
                 # 發送請求
+                logger.info(f"嘗試訪問永豐網站: {url}")
                 response = session.get(url, headers=headers, timeout=30)
                 response.raise_for_status()
                 
@@ -459,6 +539,7 @@ def send_date_report(line_bot_api, target_id, query_date):
                 # 尋找報告連結
                 report_links = []
                 target_date = f"{year}/{month}/{day}"
+                logger.info(f"尋找永豐網站上日期為 {target_date} 的報告")
                 
                 # 遍歷所有列表項
                 for li in soup.find_all('li'):
@@ -478,11 +559,13 @@ def send_date_report(line_bot_api, target_id, query_date):
                                             'url': full_url,
                                             'date': span.text.strip()
                                         })
+                                        logger.info(f"找到永豐報告: {a.text.strip()} - {span.text.strip()}")
                 
                 # 如果找到報告，下載PDF
                 if report_links:
                     # 下載PDF檔案
                     report = report_links[0]  # 取第一個符合條件的報告
+                    logger.info(f"嘗試下載永豐報告: {report['url']}")
                     pdf_response = session.get(report['url'], headers=headers, timeout=30)
                     pdf_response.raise_for_status()
                     
@@ -490,16 +573,19 @@ def send_date_report(line_bot_api, target_id, query_date):
                     with open(sinopac_pdf_path, 'wb') as f:
                         f.write(pdf_response.content)
                     
+                    logger.info(f"永豐PDF保存成功: {sinopac_pdf_path}")
+                    
                     # 解析PDF數據
                     sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
                     if not sinopac_data:
                         sinopac_error = "解析PDF失敗"
+                        logger.error(f"解析永豐PDF失敗: {sinopac_pdf_path}")
                 else:
                     sinopac_error = "在網站上找不到符合日期的報告"
                     logger.info(f"永豐期貨 {date_str} 報告在網站上找不到")
             except Exception as e:
                 sinopac_error = str(e)
-                logger.error(f"下載永豐期貨 {date_str} 報告失敗: {str(e)}")
+                logger.error(f"下載永豐期貨 {date_str} 報告失敗: {str(e)}", exc_info=True)
         
         # 更新爬取統計
         if date_str not in CRAWL_STATS['failed_dates']:
@@ -507,13 +593,16 @@ def send_date_report(line_bot_api, target_id, query_date):
         
         if fubon_error:
             CRAWL_STATS['failed_dates'][date_str]['fubon'] = fubon_error
+            logger.warning(f"富邦報告處理失敗: {fubon_error}")
         if sinopac_error:
             CRAWL_STATS['failed_dates'][date_str]['sinopac'] = sinopac_error
+            logger.warning(f"永豐報告處理失敗: {sinopac_error}")
         
         # 組合報告數據
         if fubon_data or sinopac_data:
             # 增加爬取成功計數
             CRAWL_STATS['success_count'] += 1
+            logger.info(f"成功獲取 {date_str} 的報告數據")
             
             # 如果有任一報告數據，進行組合
             from .report_handler import combine_reports_data
@@ -532,6 +621,7 @@ def send_date_report(line_bot_api, target_id, query_date):
             
             # 保存快取到檔案
             save_cache()
+            logger.info(f"報告數據已保存到快取: {date_str}")
             
             # 生成報告文字
             report_text = generate_report_text(combined_data)
@@ -549,20 +639,21 @@ def send_date_report(line_bot_api, target_id, query_date):
                 del CRAWL_STATS['failed_dates'][date_str]
         else:
             # 如果沒有找到任何報告
+            logger.warning(f"無法獲取 {date_str} 的任何報告數據")
             line_bot_api.push_message(
                 target_id,
                 TextSendMessage(text=f"抱歉，無法獲取 {formatted_date} 的籌碼報告。該日可能不是交易日，或報告尚未發布。\n\n您可以輸入「盤後籌碼-列表」查看所有可用的報告日期。")
             )
     
     except Exception as e:
-        logger.error(f"發送歷史籌碼報告時出錯: {str(e)}")
+        logger.error(f"發送歷史籌碼報告時出錯: {str(e)}", exc_info=True)
         try:
             line_bot_api.push_message(
                 target_id,
-                TextSendMessage(text=f"獲取 {query_date.strftime('%Y/%m/%d')} 的報告時出錯，請稍後再試或嘗試其他日期。")
+                TextSendMessage(text=f"獲取 {query_date.strftime('%Y/%m/%d')} 的報告時出錯，請稍後再試或嘗試其他日期。錯誤詳情: {str(e)}")
             )
-        except:
-            pass
+        except Exception as push_error:
+            logger.error(f"嘗試發送錯誤訊息時也失敗: {str(push_error)}", exc_info=True)
 
 def start_historical_fetch(line_bot_api, target_id):
     """
@@ -575,12 +666,14 @@ def start_historical_fetch(line_bot_api, target_id):
     global IS_FETCHING_HISTORY
     
     if IS_FETCHING_HISTORY:
+        logger.warning("已有歷史數據抓取任務正在進行中")
         line_bot_api.push_message(
             target_id,
             TextSendMessage(text="已有歷史數據抓取任務正在進行中，請等待完成。")
         )
         return
     
+    logger.info("開始歷史數據抓取任務")
     line_bot_api.push_message(
         target_id,
         TextSendMessage(text="開始抓取歷史數據，這可能需要一段時間，請耐心等待。抓取完成後將通知您。")
@@ -608,6 +701,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
         IS_FETCHING_HISTORY = True
         CRAWL_STATS['in_progress'] = True
         CRAWL_STATS['last_run'] = datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S')
+        logger.info("開始非同步歷史數據抓取")
         
         # 獲取最近3個月的交易日
         end_date = datetime.now(TW_TIMEZONE)
@@ -630,9 +724,11 @@ def fetch_historical_data_async(line_bot_api, target_id):
         for date in trading_days:
             date_str = date.strftime('%Y%m%d')
             CRAWL_STATS['current_progress'] = processed_days
+            logger.info(f"處理日期 {date_str} ({processed_days+1}/{total_days})")
             
             # 如果已有數據，則跳過
             if date_str in REPORT_CACHE and REPORT_CACHE[date_str].get('combined'):
+                logger.info(f"日期 {date_str} 已有快取數據，跳過")
                 processed_days += 1
                 success_days += 1
                 continue
@@ -649,14 +745,17 @@ def fetch_historical_data_async(line_bot_api, target_id):
                 fubon_pdf_path = f"pdf_files/fubon_{date_str}.pdf"
                 if os.path.exists(fubon_pdf_path):
                     # 如果已存在，直接解析
+                    logger.info(f"找到富邦報告文件: {fubon_pdf_path}")
                     try:
                         fubon_data = extract_fubon_report_data(fubon_pdf_path)
                         if not fubon_data:
                             fubon_error = "解析PDF失敗"
+                            logger.error(f"解析富邦PDF失敗: {fubon_pdf_path}")
                     except Exception as e:
                         fubon_error = str(e)
-                        logger.error(f"解析富邦期貨 {date_str} 報告時出錯: {str(e)}")
+                        logger.error(f"解析富邦期貨 {date_str} 報告時出錯: {str(e)}", exc_info=True)
                 else:
+                    logger.info(f"未找到富邦報告文件，嘗試下載: {fubon_pdf_path}")
                     # 嘗試下載該日期的報告
                     pdf_filename = f"TWPM_{year}.{month}.{day}.pdf"
                     base_url = "https://www.fubon.com/futures/wcm/home/taiwanaferhours/image/taiwanaferhours/"
@@ -667,9 +766,11 @@ def fetch_historical_data_async(line_bot_api, target_id):
                         headers = {
                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                         }
+                        logger.info(f"嘗試下載富邦報告: {pdf_url}")
                         response = requests.get(pdf_url, headers=headers, timeout=30)
                         
                         if response.status_code == 200 and response.headers.get('Content-Type', '').lower().startswith('application/pdf'):
+                            logger.info(f"成功獲取富邦報告，狀態碼: {response.status_code}")
                             # 確保目錄存在
                             os.makedirs("pdf_files", exist_ok=True)
                             
@@ -677,15 +778,19 @@ def fetch_historical_data_async(line_bot_api, target_id):
                             with open(fubon_pdf_path, 'wb') as f:
                                 f.write(response.content)
                             
+                            logger.info(f"富邦PDF保存成功: {fubon_pdf_path}")
+                            
                             # 解析數據
                             fubon_data = extract_fubon_report_data(fubon_pdf_path)
                             if not fubon_data:
                                 fubon_error = "解析PDF失敗"
+                                logger.error(f"解析富邦PDF失敗: {fubon_pdf_path}")
                         else:
                             fubon_error = f"HTTP狀態碼: {response.status_code}"
+                            logger.warning(f"富邦報告下載失敗，狀態碼: {response.status_code}")
                     except Exception as e:
                         fubon_error = str(e)
-                        logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}")
+                        logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}", exc_info=True)
                 
                 # 嘗試獲取永豐報告
                 sinopac_data = None
@@ -693,14 +798,17 @@ def fetch_historical_data_async(line_bot_api, target_id):
                 sinopac_pdf_path = f"pdf_files/sinopac_{date_str}.pdf"
                 if os.path.exists(sinopac_pdf_path):
                     # 如果已存在，直接解析
+                    logger.info(f"找到永豐報告文件: {sinopac_pdf_path}")
                     try:
                         sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
                         if not sinopac_data:
                             sinopac_error = "解析PDF失敗"
+                            logger.error(f"解析永豐PDF失敗: {sinopac_pdf_path}")
                     except Exception as e:
                         sinopac_error = str(e)
-                        logger.error(f"解析永豐期貨 {date_str} 報告時出錯: {str(e)}")
+                        logger.error(f"解析永豐期貨 {date_str} 報告時出錯: {str(e)}", exc_info=True)
                 else:
+                    logger.info(f"未找到永豐報告文件，嘗試下載: {sinopac_pdf_path}")
                     # 嘗試從永豐網站下載歷史報告
                     try:
                         from bs4 import BeautifulSoup
@@ -720,6 +828,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
                         }
                         
                         # 發送請求
+                        logger.info(f"嘗試訪問永豐網站: {url}")
                         response = session.get(url, headers=headers, timeout=30)
                         response.raise_for_status()
                         
@@ -729,6 +838,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
                         # 尋找報告連結
                         report_links = []
                         target_date = f"{year}/{month}/{day}"
+                        logger.info(f"尋找永豐網站上日期為 {target_date} 的報告")
                         
                         # 遍歷所有列表項
                         for li in soup.find_all('li'):
@@ -748,11 +858,13 @@ def fetch_historical_data_async(line_bot_api, target_id):
                                                     'url': full_url,
                                                     'date': span.text.strip()
                                                 })
+                                                logger.info(f"找到永豐報告: {a.text.strip()} - {span.text.strip()}")
                         
                         # 如果找到報告，下載PDF
                         if report_links:
                             # 下載PDF檔案
                             report = report_links[0]  # 取第一個符合條件的報告
+                            logger.info(f"嘗試下載永豐報告: {report['url']}")
                             pdf_response = session.get(report['url'], headers=headers, timeout=30)
                             pdf_response.raise_for_status()
                             
@@ -760,16 +872,19 @@ def fetch_historical_data_async(line_bot_api, target_id):
                             with open(sinopac_pdf_path, 'wb') as f:
                                 f.write(pdf_response.content)
                             
+                            logger.info(f"永豐PDF保存成功: {sinopac_pdf_path}")
+                            
                             # 解析PDF數據
                             sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
                             if not sinopac_data:
                                 sinopac_error = "解析PDF失敗"
+                                logger.error(f"解析永豐PDF失敗: {sinopac_pdf_path}")
                         else:
                             sinopac_error = "在網站上找不到符合日期的報告"
                             logger.info(f"永豐期貨 {date_str} 報告在網站上找不到")
                     except Exception as e:
                         sinopac_error = str(e)
-                        logger.error(f"下載永豐期貨 {date_str} 報告失敗: {str(e)}")
+                        logger.error(f"下載永豐期貨 {date_str} 報告失敗: {str(e)}", exc_info=True)
                 
                 # 更新爬取統計
                 if date_str not in CRAWL_STATS['failed_dates']:
@@ -777,8 +892,10 @@ def fetch_historical_data_async(line_bot_api, target_id):
                 
                 if fubon_error:
                     CRAWL_STATS['failed_dates'][date_str]['fubon'] = fubon_error
+                    logger.warning(f"富邦報告處理失敗: {fubon_error}")
                 if sinopac_error:
                     CRAWL_STATS['failed_dates'][date_str]['sinopac'] = sinopac_error
+                    logger.warning(f"永豐報告處理失敗: {sinopac_error}")
                 
                 # 組合報告數據
                 if fubon_data or sinopac_data:
@@ -799,6 +916,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
                     }
                     
                     success_days += 1
+                    logger.info(f"成功處理 {date_str} 的報告數據")
                     
                     # 如果之前有錯誤記錄，現在成功了，移除錯誤記錄
                     if date_str in CRAWL_STATS['failed_dates']:
@@ -810,6 +928,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
                 if processed_days % progress_interval == 0:
                     # 保存快取到檔案
                     save_cache()
+                    logger.info(f"進度更新: {processed_days}/{total_days} ({processed_days/total_days*100:.1f}%)")
                     
                     line_bot_api.push_message(
                         target_id,
@@ -821,11 +940,12 @@ def fetch_historical_data_async(line_bot_api, target_id):
                 time.sleep(1)
                 
             except Exception as e:
-                logger.error(f"抓取 {date_str} 的歷史數據時出錯: {str(e)}")
+                logger.error(f"抓取 {date_str} 的歷史數據時出錯: {str(e)}", exc_info=True)
                 processed_days += 1
         
         # 保存最終快取到檔案
         save_cache()
+        logger.info(f"歷史數據抓取完成，成功: {success_days}/{total_days}")
         
         # 更新爬取統計
         CRAWL_STATS['in_progress'] = False
@@ -839,7 +959,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
         )
     
     except Exception as e:
-        logger.error(f"抓取歷史數據時出錯: {str(e)}")
+        logger.error(f"抓取歷史數據時出錯: {str(e)}", exc_info=True)
         line_bot_api.push_message(
             target_id,
             TextSendMessage(text=f"抓取歷史數據時發生錯誤: {str(e)}")
@@ -847,6 +967,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
     finally:
         IS_FETCHING_HISTORY = False
         CRAWL_STATS['in_progress'] = False
+        logger.info("完成歷史數據抓取任務")
 
 def list_available_reports(line_bot_api, target_id):
     """
@@ -858,6 +979,7 @@ def list_available_reports(line_bot_api, target_id):
     """
     try:
         available_dates = get_available_dates()
+        logger.info(f"獲取可用報告日期，共 {len(available_dates)} 個")
         
         if not available_dates:
             line_bot_api.push_message(
@@ -890,6 +1012,7 @@ def list_available_reports(line_bot_api, target_id):
                 target_id,
                 TextSendMessage(text=message)
             )
+            logger.info(f"發送可用報告列表 {i+1}/{len(chunks)}")
         
         # 發送使用指引
         usage_guide = (
@@ -905,10 +1028,10 @@ def list_available_reports(line_bot_api, target_id):
         )
     
     except Exception as e:
-        logger.error(f"列出可用報告時出錯: {str(e)}")
+        logger.error(f"列出可用報告時出錯: {str(e)}", exc_info=True)
         line_bot_api.push_message(
             target_id,
-            TextSendMessage(text="列出可用報告時出錯，請稍後再試。")
+            TextSendMessage(text=f"列出可用報告時出錯，請稍後再試。錯誤詳情: {str(e)}")
         )
 
 def show_crawl_status(line_bot_api, target_id):
@@ -960,6 +1083,7 @@ def show_crawl_status(line_bot_api, target_id):
             target_id,
             TextSendMessage(text=status_message)
         )
+        logger.info("發送爬取狀態基本統計")
         
         # 如果有失敗記錄，發送失敗詳情
         failed_dates = CRAWL_STATS.get('failed_dates', {})
@@ -992,6 +1116,7 @@ def show_crawl_status(line_bot_api, target_id):
                     target_id,
                     TextSendMessage(text=fail_message)
                 )
+                logger.info(f"發送失敗記錄 {i+1}/{len(chunks)}")
         
         # 發送功能指引
         help_message = (
@@ -1007,7 +1132,7 @@ def show_crawl_status(line_bot_api, target_id):
         )
     
     except Exception as e:
-        logger.error(f"顯示爬取狀態時出錯: {str(e)}")
+        logger.error(f"顯示爬取狀態時出錯: {str(e)}", exc_info=True)
         line_bot_api.push_message(
             target_id,
             TextSendMessage(text=f"顯示爬取狀態時出錯: {str(e)}")
@@ -1054,58 +1179,4 @@ def get_most_recent_date(dates):
 
 def send_specialized_report(line_bot_api, target_id, report_type):
     """
-    發送專門類型的報告
-    
-    Args:
-        line_bot_api: LINE Bot API實例
-        target_id: 目標ID（用戶ID或群組ID）
-        report_type: 報告類型 (futures, options, institutional, retail, full)
-    """
-    try:
-        # 獲取最新報告數據
-        report_data = get_latest_report_data()
-        
-        if not report_data:
-            # 檢查是否有最近的報告
-            available_dates = get_available_dates()
-            recent_date = get_most_recent_date(available_dates)
-            
-            if recent_date and recent_date in REPORT_CACHE and REPORT_CACHE[recent_date].get('combined'):
-                # 使用最近的報告
-                report_data = REPORT_CACHE[recent_date]['combined']
-                line_bot_api.push_message(
-                    target_id,
-                    TextSendMessage(text=f"注意：目前沒有最新報告，以下是 {recent_date[:4]}/{recent_date[4:6]}/{recent_date[6:8]} 的報告：")
-                )
-            else:
-                message = (
-                    f"目前尚未有{COMMAND_MAPPING.get(report_type, '籌碼')}報告可供查詢。\n\n"
-                    "您可以使用「盤後籌碼-YYYYMMDD」格式查詢特定日期的報告，"
-                    "或輸入「盤後籌碼-列表」查看所有可用的報告日期。"
-                )
-                line_bot_api.push_message(
-                    target_id,
-                    TextSendMessage(text=message)
-                )
-                return
-        
-        # 生成專門報告文字
-        report_text = generate_specialized_report(report_data, report_type)
-        
-        # 發送報告
-        line_bot_api.push_message(
-            target_id,
-            TextSendMessage(text=report_text)
-        )
-        
-        logger.info(f"成功發送{report_type}專門報告給目標: {target_id}")
-    
-    except Exception as e:
-        logger.error(f"發送專門報告時出錯: {str(e)}")
-        try:
-            line_bot_api.push_message(
-                target_id,
-                TextSendMessage(text=f"發送{report_type}專門報告時出錯，請稍後再試。")
-            )
-        except:
-            pass
+    發送專門類型
