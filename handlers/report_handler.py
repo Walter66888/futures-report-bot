@@ -25,7 +25,8 @@ LATEST_REPORT = {
     'fubon': None,
     'sinopac': None,
     'combined': None,
-    'last_update': None
+    'last_update': None,
+    'date': None  # 添加日期字段
 }
 
 def monitor_futures_reports(line_bot_api, group_id=None):
@@ -47,6 +48,7 @@ def monitor_futures_reports(line_bot_api, group_id=None):
         try:
             now = datetime.now(TW_TIMEZONE)
             current_time = now.strftime("%H:%M")
+            today_date = now.strftime("%Y%m%d")
             
             # 只在交易日的14:45到16:30之間檢查
             if now.weekday() < 5 and "14:45" <= current_time <= "16:30":
@@ -59,9 +61,17 @@ def monitor_futures_reports(line_bot_api, group_id=None):
                     fubon_data = extract_fubon_report_data(fubon_report)
                     if fubon_data:
                         LATEST_REPORT['fubon'] = fubon_data
+                        LATEST_REPORT['date'] = today_date
                         LATEST_REPORT['last_update'] = datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S')
                         pushed_reports['fubon'] = fubon_report
                         logger.info("更新富邦期貨報告資料成功")
+                        
+                        # 將報告加入快取
+                        from handlers.line_handler import REPORT_CACHE
+                        if today_date not in REPORT_CACHE:
+                            REPORT_CACHE[today_date] = {}
+                        REPORT_CACHE[today_date]['fubon'] = fubon_data
+                        REPORT_CACHE[today_date]['last_update'] = LATEST_REPORT['last_update']
                     
                 # 檢查永豐期貨報告
                 sinopac_report = check_sinopac_futures_report()
@@ -72,9 +82,17 @@ def monitor_futures_reports(line_bot_api, group_id=None):
                     sinopac_data = extract_sinopac_report_data(sinopac_report)
                     if sinopac_data:
                         LATEST_REPORT['sinopac'] = sinopac_data
+                        LATEST_REPORT['date'] = today_date
                         LATEST_REPORT['last_update'] = datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S')
                         pushed_reports['sinopac'] = sinopac_report
                         logger.info("更新永豐期貨報告資料成功")
+                        
+                        # 將報告加入快取
+                        from handlers.line_handler import REPORT_CACHE
+                        if today_date not in REPORT_CACHE:
+                            REPORT_CACHE[today_date] = {}
+                        REPORT_CACHE[today_date]['sinopac'] = sinopac_data
+                        REPORT_CACHE[today_date]['last_update'] = LATEST_REPORT['last_update']
                 
                 # 如果兩份報告都更新了，且尚未推送組合報告
                 if (LATEST_REPORT['fubon'] and LATEST_REPORT['sinopac'] and 
@@ -83,6 +101,12 @@ def monitor_futures_reports(line_bot_api, group_id=None):
                     # 組合兩份報告資料
                     combined_data = combine_reports_data(LATEST_REPORT['fubon'], LATEST_REPORT['sinopac'])
                     LATEST_REPORT['combined'] = combined_data
+                    
+                    # 更新快取
+                    from handlers.line_handler import REPORT_CACHE
+                    if today_date not in REPORT_CACHE:
+                        REPORT_CACHE[today_date] = {}
+                    REPORT_CACHE[today_date]['combined'] = combined_data
                     
                     # 生成報告文字
                     report_text = generate_report_text(combined_data)
@@ -113,6 +137,7 @@ def monitor_futures_reports(line_bot_api, group_id=None):
         # 等待2-3分鐘再檢查
         sleep_time = random.randint(120, 180)  # 2-3分鐘
         time.sleep(sleep_time)
+
 
 def combine_reports_data(fubon_data, sinopac_data):
     """
