@@ -2,29 +2,21 @@
 
 【大盤數據】
 加權指數: {taiex_close} {taiex_change_sign}{taiex_change_abs} ({taiex_change_percent}%)
+台指期近月: {tx_close} {tx_change_sign}{tx_change_abs} ({tx_change_percent}%)
+台指期現貨價差: {tx_bias:+.2f}
 成交金額: {volume} 億元
 
 【三大法人買賣超】
-三大法人: {inst_total:+.2f} 億元
-外資: {inst_foreign:+.2f} 億元
-投信: {inst_trust:+.2f} 億元
-自營商: {inst_dealer:+.2f} 億元
+三大法人: {inst_total:+.2f} 億元 ({inst_total_change:+.2f})
+外資: {inst_foreign:+.2f} 億元 ({inst_foreign_change:+.2f})
+投信: {inst_trust:+.2f} 億元 ({inst_trust_change:+.2f})
+自營商: {inst_dealer:+.2f} 億元 ({inst_dealer_change:+.2f})
 
 【期貨未平倉】
-三大法人台指期未平倉: {futures_three_insti_oi:+d} 口
-三大法人台指期未平倉增減: {futures_three_insti_oi_change:+d} 口
-外資台指期未平倉: {futures_foreign_oi:+d} 口
-外資台指期未平倉增減: {futures_foreign_oi_change:+d} 口
-投信台指期未平倉: {futures_trust_oi:+d} 口
-投信台指期未平倉增減: {futures_trust_oi_change:+d} 口
-自營商台指期未平倉: {futures_dealer_oi:+d} 口
-自營商台指期未平倉增減: {futures_dealer_oi_change:+d} 口
-
-【選擇權未平倉】
-外資買權未平倉: {options_call_oi:+d} 口
-外資買權未平倉增減: {options_call_oi_change:+d} 口
-外資賣權未平倉: {options_put_oi:+d} 口
-外資賣權未平倉增減: {options_put_oi_change:+d} 口
+三大法人台指期未平倉: {futures_three_insti_oi:+d} 口 ({futures_three_insti_oi_change:+d})
+外資台指期未平倉: {futures_foreign_oi:+d} 口 ({futures_foreign_oi_change:+d})
+投信台指期未平倉: {futures_trust_oi:+d} 口 ({futures_trust_oi_change:+d})
+自營商台指期未平倉: {futures_dealer_oi:+d} 口 ({futures_dealer_oi_change:+d})
 
 【散戶指標】
 小台散戶多空比: {retail_ratio:.2f}% (前日: {retail_ratio_prev:.2f}%)
@@ -36,7 +28,9 @@
 
 【其他指標】
 Put/Call Ratio: {pc_ratio:.2f}% (前日: {pc_ratio_prev:.2f}%)
-VIX指標: {vix:.2f}
+VIX指標: {vix:.2f} (前日: {vix_prev:.2f})
+選擇權買權最大未平倉: {max_call_oi_point} 點
+選擇權賣權最大未平倉: {max_put_oi_point} 點
 
 【資料來源】
 {sources}
