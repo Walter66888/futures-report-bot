@@ -1179,4 +1179,61 @@ def get_most_recent_date(dates):
 
 def send_specialized_report(line_bot_api, target_id, report_type):
     """
-    發送專門類型
+    發送專門類型的報告
+    
+    Args:
+        line_bot_api: LINE Bot API實例
+        target_id: 目標ID（用戶ID或群組ID）
+        report_type: 報告類型 (futures, options, institutional, retail, full)
+    """
+    try:
+        # 獲取最新報告數據
+        report_data = get_latest_report_data()
+        logger.info(f"嘗試獲取專門類型的報告: {report_type}")
+        
+        if not report_data:
+            # 檢查是否有最近的報告
+            available_dates = get_available_dates()
+            recent_date = get_most_recent_date(available_dates)
+            
+            if recent_date and recent_date in REPORT_CACHE and REPORT_CACHE[recent_date].get('combined'):
+                # 使用最近的報告
+                report_data = REPORT_CACHE[recent_date]['combined']
+                logger.info(f"使用最近日期 {recent_date} 的報告")
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=f"注意：目前沒有最新報告，以下是 {recent_date[:4]}/{recent_date[4:6]}/{recent_date[6:8]} 的報告：")
+                )
+            else:
+                message = (
+                    f"目前尚未有{COMMAND_MAPPING.get(report_type, '籌碼')}報告可供查詢。\n\n"
+                    "您可以使用「盤後籌碼-YYYYMMDD」格式查詢特定日期的報告，"
+                    "或輸入「盤後籌碼-列表」查看所有可用的報告日期。"
+                )
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=message)
+                )
+                logger.warning(f"沒有可用的專門報告數據: {report_type}")
+                return
+        
+        # 生成專門報告文字
+        report_text = generate_specialized_report(report_data, report_type)
+        
+        # 發送報告
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=report_text)
+        )
+        
+        logger.info(f"成功發送{report_type}專門報告給目標: {target_id}")
+    
+    except Exception as e:
+        logger.error(f"發送專門報告時出錯: {str(e)}", exc_info=True)
+        try:
+            line_bot_api.push_message(
+                target_id,
+                TextSendMessage(text=f"發送{report_type}專門報告時出錯，請稍後再試。錯誤詳情: {str(e)}")
+            )
+        except Exception as push_error:
+            logger.error(f"發送錯誤訊息時也失敗: {str(push_error)}", exc_info=True)
