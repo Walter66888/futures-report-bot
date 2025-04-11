@@ -11,6 +11,8 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import pytz
 from dotenv import load_dotenv
+from datetime import datetime
+import PyPDF2
 
 from crawlers.fubon_crawler import check_fubon_futures_report
 from crawlers.sinopac_crawler import check_sinopac_futures_report
@@ -94,6 +96,92 @@ def test_cache():
             return "緩存寫入成功但無法找到文件"
     except Exception as e:
         return f"測試緩存時出錯: {str(e)}"
+
+@app.route("/check-pdf", methods=['GET'])
+def check_pdf():
+    """检查PDF文件内容"""
+    try:
+        date_str = request.args.get('date', datetime.now(TW_TIMEZONE).strftime('%Y%m%d'))
+        pdf_type = request.args.get('type', 'fubon')
+        
+        if pdf_type not in ['fubon', 'sinopac']:
+            return "无效的PDF类型，请选择 'fubon' 或 'sinopac'", 400
+        
+        pdf_path = f"pdf_files/{pdf_type}_{date_str}.pdf"
+        
+        if not os.path.exists(pdf_path):
+            return f"PDF文件不存在: {pdf_path}", 404
+        
+        # 尝试使用PyPDF2读取PDF
+        try:
+            with open(pdf_path, "rb") as f:
+                pdf_reader = PyPDF2.PdfReader(f)
+                text = ""
+                for page in range(len(pdf_reader.pages)):
+                    text += pdf_reader.pages[page].extract_text()
+            
+            # 获取PDF基本信息
+            page_count = len(pdf_reader.pages)
+            text_length = len(text)
+            
+            # 返回PDF文本预览
+            preview = text[:1000] + ("..." if len(text) > 1000 else "")
+            
+            # 测试一些关键正则表达式
+            import re
+            
+            # 测试加权指数正则
+            taiex_matches = []
+            taiex_patterns = [
+                r"加權指數\s+(\d+\.\d+)\s+[▲▼]\s*(\d+\.\d+)\s*\(\s*(\d+\.\d+)%\)",
+                r"加權指數[:\s]+(\d+[\.,]\d+)\s*[▲▼]\s*(\d+[\.,]\d+)\s*\(\s*([+-]?\d+[\.,]\d+)%\)",
+                r"加權指數.*?(\d+\.\d+).*?(\d+\.\d+).*?(\d+\.\d+)%"
+            ]
+            
+            for pattern in taiex_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    taiex_matches.append({
+                        'pattern': pattern,
+                        'groups': match.groups()
+                    })
+            
+            # 三大法人买卖超正则
+            insti_matches = []
+            insti_patterns = [
+                r"三大法人買賣超\s*\(億\)\s+\+?(-?\d+\.\d+)",
+                r"三大法人買賣超.*?(\+?-?\d+\.\d+)",
+                r"三大法人.*?(\+?-?\d+\.\d+)"
+            ]
+            
+            for pattern in insti_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    insti_matches.append({
+                        'pattern': pattern,
+                        'groups': match.groups()
+                    })
+            
+            return f"""
+            <h1>PDF文件检查结果</h1>
+            <p>文件: {pdf_path}</p>
+            <p>页数: {page_count}</p>
+            <p>提取文本长度: {text_length}</p>
+            
+            <h2>加权指数正则匹配结果:</h2>
+            <pre>{taiex_matches}</pre>
+            
+            <h2>三大法人正则匹配结果:</h2>
+            <pre>{insti_matches}</pre>
+            
+            <h2>文本预览:</h2>
+            <pre style="white-space: pre-wrap; word-wrap: break-word;">{preview}</pre>
+            """
+        except Exception as pdf_error:
+            return f"读取PDF文件失败: {str(pdf_error)}", 500
+        
+    except Exception as e:
+        return f"检查PDF时出错: {str(e)}", 500
 
 # LINE Bot 設定
 try:
