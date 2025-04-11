@@ -158,15 +158,15 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
                 
                 # 檢查是否為有效的交易日
                 if not is_trading_day(query_date):
-                    line_bot_api.push_message(
-                        target_id,
+                    line_bot_api.reply_message(
+                         event.reply_token,
                         TextSendMessage(text=f"{query_date.strftime('%Y/%m/%d')} 不是交易日，無法查詢籌碼資料。")
                     )
                     return
                 
                 # 立即回覆，避免超時
-                line_bot_api.push_message(
-                    target_id,
+                line_bot_api.reply_message(
+                     event.reply_token,
                     TextSendMessage(text=f"正在獲取 {query_date.strftime('%Y/%m/%d')} 的籌碼報告，請稍候...")
                 )
                 
@@ -179,8 +179,8 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
                 thread.start()
                 return
             except ValueError:
-                line_bot_api.push_message(
-                    target_id,
+                line_bot_api.reply_message(
+                     event.reply_token,
                     TextSendMessage(text="日期格式錯誤，請使用「盤後籌碼-YYYYMMDD」格式查詢，例如：盤後籌碼-20250410")
                 )
                 return
