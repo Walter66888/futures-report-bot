@@ -5,6 +5,7 @@ import os
 import re
 import logging
 import threading
+import json
 from datetime import datetime, timedelta
 import pytz
 from linebot.models import TextSendMessage
@@ -40,14 +41,59 @@ ADMIN_FETCH_COMMAND = "盤後籌碼管理員-開始抓取歷史數據X9527"
 # 查詢已抓取數據的命令
 LIST_AVAILABLE_COMMAND = "盤後籌碼-列表"
 
+# 查詢爬取狀態的命令
+CRAWL_STATUS_COMMAND = "盤後籌碼-狀態"
+
 # 報告快取，格式為 {'日期': {'fubon': {...}, 'sinopac': {...}, 'combined': {...}}}
 REPORT_CACHE = {}
+
+# 爬取統計
+CRAWL_STATS = {
+    'last_run': None,
+    'total_attempts': 0,
+    'success_count': 0,
+    'failed_dates': {},  # {date_str: {'fubon': error, 'sinopac': error}}
+    'in_progress': False,
+    'current_progress': 0,
+    'total_tasks': 0
+}
 
 # 正在處理的日期請求
 PROCESSING_DATES = set()
 
 # 是否正在進行大規模歷史數據抓取
 IS_FETCHING_HISTORY = False
+
+# 確保快取目錄存在
+os.makedirs("pdf_files", exist_ok=True)
+
+# 快取檔案路徑
+CACHE_FILE = "report_cache.json"
+
+# 載入快取
+def load_cache():
+    """載入報告快取"""
+    global REPORT_CACHE
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                REPORT_CACHE = json.load(f)
+            logger.info(f"已從 {CACHE_FILE} 載入 {len(REPORT_CACHE)} 個日期的報告快取")
+    except Exception as e:
+        logger.error(f"載入快取時出錯: {str(e)}")
+
+# 保存快取
+def save_cache():
+    """保存報告快取"""
+    try:
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(REPORT_CACHE, f, ensure_ascii=False, indent=2)
+        logger.info(f"已保存 {len(REPORT_CACHE)} 個日期的報告快取到 {CACHE_FILE}")
+    except Exception as e:
+        logger.error(f"保存快取時出錯: {str(e)}")
+
+# 初始化時載入快取
+load_cache()
 
 def handle_line_message(line_bot_api, event, is_secret_command=False):
     """
@@ -86,6 +132,11 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
         # 匹配查詢已抓取數據的命令
         if text == LIST_AVAILABLE_COMMAND:
             list_available_reports(line_bot_api, target_id)
+            return
+        
+        # 匹配查詢爬取狀態的命令
+        if text == CRAWL_STATUS_COMMAND and is_private:
+            show_crawl_status(line_bot_api, target_id)
             return
         
         # 處理密語指令 - 發送最新報告
@@ -305,6 +356,9 @@ def send_date_report(line_bot_api, target_id, query_date):
             )
             return
         
+        # 更新爬取統計
+        CRAWL_STATS['total_attempts'] += 1
+        
         # 構建檔案名稱
         year = date_str[:4]
         month = date_str[4:6]
@@ -312,10 +366,17 @@ def send_date_report(line_bot_api, target_id, query_date):
         
         # 嘗試獲取富邦報告
         fubon_data = None
+        fubon_error = None
         fubon_pdf_path = f"pdf_files/fubon_{date_str}.pdf"
         if os.path.exists(fubon_pdf_path):
             # 如果已存在，直接解析
-            fubon_data = extract_fubon_report_data(fubon_pdf_path)
+            try:
+                fubon_data = extract_fubon_report_data(fubon_pdf_path)
+                if not fubon_data:
+                    fubon_error = "解析PDF失敗"
+            except Exception as e:
+                fubon_error = str(e)
+                logger.error(f"解析富邦期貨 {date_str} 報告時出錯: {str(e)}")
         else:
             # 嘗試下載該日期的報告
             pdf_filename = f"TWPM_{year}.{month}.{day}.pdf"
@@ -339,12 +400,16 @@ def send_date_report(line_bot_api, target_id, query_date):
                     
                     # 解析數據
                     fubon_data = extract_fubon_report_data(fubon_pdf_path)
+                    if not fubon_data:
+                        fubon_error = "解析PDF失敗"
                 else:
+                    fubon_error = f"HTTP狀態碼: {response.status_code}"
                     line_bot_api.push_message(
                         target_id,
                         TextSendMessage(text=f"無法從富邦期貨獲取 {formatted_date} 的報告 (狀態碼: {response.status_code})，嘗試其他來源...")
                     )
             except Exception as e:
+                fubon_error = str(e)
                 logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}")
                 line_bot_api.push_message(
                     target_id,
@@ -353,21 +418,103 @@ def send_date_report(line_bot_api, target_id, query_date):
         
         # 嘗試獲取永豐報告
         sinopac_data = None
+        sinopac_error = None
         sinopac_pdf_path = f"pdf_files/sinopac_{date_str}.pdf"
         if os.path.exists(sinopac_pdf_path):
             # 如果已存在，直接解析
-            sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
+            try:
+                sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
+                if not sinopac_data:
+                    sinopac_error = "解析PDF失敗"
+            except Exception as e:
+                sinopac_error = str(e)
+                logger.error(f"解析永豐期貨 {date_str} 報告時出錯: {str(e)}")
         else:
-            # 永豐的歷史報告需要從網頁爬取，比較複雜
-            # 這裡簡化處理，提示用戶只能獲取富邦數據
-            if not fubon_data:
-                line_bot_api.push_message(
-                    target_id,
-                    TextSendMessage(text=f"無法獲取永豐期貨 {formatted_date} 的報告，此日期可能沒有可用的數據。")
-                )
+            # 嘗試從永豐網站下載歷史報告
+            try:
+                from bs4 import BeautifulSoup
+                
+                # 設定目標URL
+                url = "https://www.spf.com.tw/sinopacSPF/research/list.do?id=1709f20d3ff00000d8e2039e8984ed51"
+                
+                # 使用進階的請求標頭和Session保持連接
+                import requests
+                session = requests.Session()
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Cache-Control': 'max-age=0'
+                }
+                
+                # 發送請求
+                response = session.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                # 使用BeautifulSoup解析HTML
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # 尋找報告連結
+                report_links = []
+                target_date = f"{year}/{month}/{day}"
+                
+                # 遍歷所有列表項
+                for li in soup.find_all('li'):
+                    # 查找a標籤
+                    a_tags = li.find_all('a')
+                    for a in a_tags:
+                        if '台指期籌碼快訊' in a.text:
+                            # 查找相鄰的span標籤，可能包含日期
+                            span_tags = li.find_all('span')
+                            for span in span_tags:
+                                if target_date in span.text:
+                                    href = a.get('href')
+                                    if href:
+                                        full_url = f"https://www.spf.com.tw{href}" if href.startswith('/') else href
+                                        report_links.append({
+                                            'title': a.text.strip(),
+                                            'url': full_url,
+                                            'date': span.text.strip()
+                                        })
+                
+                # 如果找到報告，下載PDF
+                if report_links:
+                    # 下載PDF檔案
+                    report = report_links[0]  # 取第一個符合條件的報告
+                    pdf_response = session.get(report['url'], headers=headers, timeout=30)
+                    pdf_response.raise_for_status()
+                    
+                    # 保存PDF檔案
+                    with open(sinopac_pdf_path, 'wb') as f:
+                        f.write(pdf_response.content)
+                    
+                    # 解析PDF數據
+                    sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
+                    if not sinopac_data:
+                        sinopac_error = "解析PDF失敗"
+                else:
+                    sinopac_error = "在網站上找不到符合日期的報告"
+                    logger.info(f"永豐期貨 {date_str} 報告在網站上找不到")
+            except Exception as e:
+                sinopac_error = str(e)
+                logger.error(f"下載永豐期貨 {date_str} 報告失敗: {str(e)}")
+        
+        # 更新爬取統計
+        if date_str not in CRAWL_STATS['failed_dates']:
+            CRAWL_STATS['failed_dates'][date_str] = {}
+        
+        if fubon_error:
+            CRAWL_STATS['failed_dates'][date_str]['fubon'] = fubon_error
+        if sinopac_error:
+            CRAWL_STATS['failed_dates'][date_str]['sinopac'] = sinopac_error
         
         # 組合報告數據
         if fubon_data or sinopac_data:
+            # 增加爬取成功計數
+            CRAWL_STATS['success_count'] += 1
+            
             # 如果有任一報告數據，進行組合
             from .report_handler import combine_reports_data
             combined_data = combine_reports_data(fubon_data, sinopac_data)
@@ -383,6 +530,9 @@ def send_date_report(line_bot_api, target_id, query_date):
                 'last_update': datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S')
             }
             
+            # 保存快取到檔案
+            save_cache()
+            
             # 生成報告文字
             report_text = generate_report_text(combined_data)
             
@@ -393,6 +543,10 @@ def send_date_report(line_bot_api, target_id, query_date):
             )
             
             logger.info(f"成功發送 {date_str} 的籌碼報告給目標: {target_id}")
+            
+            # 如果之前有錯誤記錄，現在成功了，移除錯誤記錄
+            if date_str in CRAWL_STATS['failed_dates']:
+                del CRAWL_STATS['failed_dates'][date_str]
         else:
             # 如果沒有找到任何報告
             line_bot_api.push_message(
@@ -452,6 +606,8 @@ def fetch_historical_data_async(line_bot_api, target_id):
     
     try:
         IS_FETCHING_HISTORY = True
+        CRAWL_STATS['in_progress'] = True
+        CRAWL_STATS['last_run'] = datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S')
         
         # 獲取最近3個月的交易日
         end_date = datetime.now(TW_TIMEZONE)
@@ -459,6 +615,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
         trading_days = get_trading_days(start_date, end_date)
         
         total_days = len(trading_days)
+        CRAWL_STATS['total_tasks'] = total_days
         processed_days = 0
         success_days = 0
         
@@ -472,6 +629,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
         
         for date in trading_days:
             date_str = date.strftime('%Y%m%d')
+            CRAWL_STATS['current_progress'] = processed_days
             
             # 如果已有數據，則跳過
             if date_str in REPORT_CACHE and REPORT_CACHE[date_str].get('combined'):
@@ -487,10 +645,17 @@ def fetch_historical_data_async(line_bot_api, target_id):
                 
                 # 嘗試獲取富邦報告
                 fubon_data = None
+                fubon_error = None
                 fubon_pdf_path = f"pdf_files/fubon_{date_str}.pdf"
                 if os.path.exists(fubon_pdf_path):
                     # 如果已存在，直接解析
-                    fubon_data = extract_fubon_report_data(fubon_pdf_path)
+                    try:
+                        fubon_data = extract_fubon_report_data(fubon_pdf_path)
+                        if not fubon_data:
+                            fubon_error = "解析PDF失敗"
+                    except Exception as e:
+                        fubon_error = str(e)
+                        logger.error(f"解析富邦期貨 {date_str} 報告時出錯: {str(e)}")
                 else:
                     # 嘗試下載該日期的報告
                     pdf_filename = f"TWPM_{year}.{month}.{day}.pdf"
@@ -514,15 +679,106 @@ def fetch_historical_data_async(line_bot_api, target_id):
                             
                             # 解析數據
                             fubon_data = extract_fubon_report_data(fubon_pdf_path)
+                            if not fubon_data:
+                                fubon_error = "解析PDF失敗"
+                        else:
+                            fubon_error = f"HTTP狀態碼: {response.status_code}"
                     except Exception as e:
+                        fubon_error = str(e)
                         logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}")
                 
-                # 嘗試獲取永豐報告 (簡化處理，這裡不實際抓取永豐)
+                # 嘗試獲取永豐報告
                 sinopac_data = None
+                sinopac_error = None
                 sinopac_pdf_path = f"pdf_files/sinopac_{date_str}.pdf"
                 if os.path.exists(sinopac_pdf_path):
                     # 如果已存在，直接解析
-                    sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
+                    try:
+                        sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
+                        if not sinopac_data:
+                            sinopac_error = "解析PDF失敗"
+                    except Exception as e:
+                        sinopac_error = str(e)
+                        logger.error(f"解析永豐期貨 {date_str} 報告時出錯: {str(e)}")
+                else:
+                    # 嘗試從永豐網站下載歷史報告
+                    try:
+                        from bs4 import BeautifulSoup
+                        
+                        # 設定目標URL
+                        url = "https://www.spf.com.tw/sinopacSPF/research/list.do?id=1709f20d3ff00000d8e2039e8984ed51"
+                        
+                        # 使用進階的請求標頭和Session保持連接
+                        session = requests.Session()
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Cache-Control': 'max-age=0'
+                        }
+                        
+                        # 發送請求
+                        response = session.get(url, headers=headers, timeout=30)
+                        response.raise_for_status()
+                        
+                        # 使用BeautifulSoup解析HTML
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        
+                        # 尋找報告連結
+                        report_links = []
+                        target_date = f"{year}/{month}/{day}"
+                        
+                        # 遍歷所有列表項
+                        for li in soup.find_all('li'):
+                            # 查找a標籤
+                            a_tags = li.find_all('a')
+                            for a in a_tags:
+                                if '台指期籌碼快訊' in a.text:
+                                    # 查找相鄰的span標籤，可能包含日期
+                                    span_tags = li.find_all('span')
+                                    for span in span_tags:
+                                        if target_date in span.text:
+                                            href = a.get('href')
+                                            if href:
+                                                full_url = f"https://www.spf.com.tw{href}" if href.startswith('/') else href
+                                                report_links.append({
+                                                    'title': a.text.strip(),
+                                                    'url': full_url,
+                                                    'date': span.text.strip()
+                                                })
+                        
+                        # 如果找到報告，下載PDF
+                        if report_links:
+                            # 下載PDF檔案
+                            report = report_links[0]  # 取第一個符合條件的報告
+                            pdf_response = session.get(report['url'], headers=headers, timeout=30)
+                            pdf_response.raise_for_status()
+                            
+                            # 保存PDF檔案
+                            with open(sinopac_pdf_path, 'wb') as f:
+                                f.write(pdf_response.content)
+                            
+                            # 解析PDF數據
+                            sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
+                            if not sinopac_data:
+                                sinopac_error = "解析PDF失敗"
+                        else:
+                            sinopac_error = "在網站上找不到符合日期的報告"
+                            logger.info(f"永豐期貨 {date_str} 報告在網站上找不到")
+                    except Exception as e:
+                        sinopac_error = str(e)
+                        logger.error(f"下載永豐期貨 {date_str} 報告失敗: {str(e)}")
+                
+                # 更新爬取統計
+                if date_str not in CRAWL_STATS['failed_dates']:
+                    CRAWL_STATS['failed_dates'][date_str] = {}
+                
+                if fubon_error:
+                    CRAWL_STATS['failed_dates'][date_str]['fubon'] = fubon_error
+                if sinopac_error:
+                    CRAWL_STATS['failed_dates'][date_str]['sinopac'] = sinopac_error
                 
                 # 組合報告數據
                 if fubon_data or sinopac_data:
@@ -543,11 +799,18 @@ def fetch_historical_data_async(line_bot_api, target_id):
                     }
                     
                     success_days += 1
+                    
+                    # 如果之前有錯誤記錄，現在成功了，移除錯誤記錄
+                    if date_str in CRAWL_STATS['failed_dates']:
+                        del CRAWL_STATS['failed_dates'][date_str]
                 
                 processed_days += 1
                 
                 # 每隔一定數量的日期發送進度更新
                 if processed_days % progress_interval == 0:
+                    # 保存快取到檔案
+                    save_cache()
+                    
                     line_bot_api.push_message(
                         target_id,
                         TextSendMessage(text=f"歷史數據抓取進度: {processed_days}/{total_days} ({processed_days/total_days*100:.1f}%)")
@@ -561,10 +824,18 @@ def fetch_historical_data_async(line_bot_api, target_id):
                 logger.error(f"抓取 {date_str} 的歷史數據時出錯: {str(e)}")
                 processed_days += 1
         
+        # 保存最終快取到檔案
+        save_cache()
+        
+        # 更新爬取統計
+        CRAWL_STATS['in_progress'] = False
+        CRAWL_STATS['current_progress'] = total_days
+        CRAWL_STATS['success_count'] = success_days
+        
         # 發送完成消息
         line_bot_api.push_message(
             target_id,
-            TextSendMessage(text=f"歷史數據抓取完成！成功獲取 {success_days}/{total_days} 個交易日的數據。\n\n您可以輸入「盤後籌碼-列表」查看所有可用的報告日期。")
+            TextSendMessage(text=f"歷史數據抓取完成！成功獲取 {success_days}/{total_days} 個交易日的數據。\n\n您可以輸入「盤後籌碼-列表」查看所有可用的報告日期，或輸入「盤後籌碼-狀態」查看詳細的爬取統計。")
         )
     
     except Exception as e:
@@ -575,6 +846,7 @@ def fetch_historical_data_async(line_bot_api, target_id):
         )
     finally:
         IS_FETCHING_HISTORY = False
+        CRAWL_STATS['in_progress'] = False
 
 def list_available_reports(line_bot_api, target_id):
     """
@@ -639,6 +911,108 @@ def list_available_reports(line_bot_api, target_id):
             TextSendMessage(text="列出可用報告時出錯，請稍後再試。")
         )
 
+def show_crawl_status(line_bot_api, target_id):
+    """
+    顯示爬取狀態
+    
+    Args:
+        line_bot_api: LINE Bot API實例
+        target_id: 目標ID（用戶ID）
+    """
+    try:
+        # 獲取基本統計信息
+        last_run = CRAWL_STATS.get('last_run', '尚未執行')
+        total_attempts = CRAWL_STATS.get('total_attempts', 0)
+        success_count = CRAWL_STATS.get('success_count', 0)
+        failed_count = len(CRAWL_STATS.get('failed_dates', {}))
+        in_progress = CRAWL_STATS.get('in_progress', False)
+        current_progress = CRAWL_STATS.get('current_progress', 0)
+        total_tasks = CRAWL_STATS.get('total_tasks', 0)
+        
+        # 計算成功率
+        success_rate = 0
+        if total_attempts > 0:
+            success_rate = (success_count / total_attempts) * 100
+        
+        # 生成狀態訊息
+        status_message = f"【爬取狀態報告】\n\n"
+        
+        # 進行中狀態
+        if in_progress:
+            progress_percent = 0
+            if total_tasks > 0:
+                progress_percent = (current_progress / total_tasks) * 100
+            status_message += f"⏳ 正在進行歷史數據抓取: {current_progress}/{total_tasks} ({progress_percent:.1f}%)\n\n"
+        
+        # 基本統計
+        status_message += f"最後執行時間: {last_run}\n"
+        status_message += f"總計嘗試次數: {total_attempts}\n"
+        status_message += f"成功次數: {success_count}\n"
+        status_message += f"失敗次數: {failed_count}\n"
+        status_message += f"成功率: {success_rate:.1f}%\n\n"
+        
+        # 獲取快取的統計
+        cached_dates = len(REPORT_CACHE)
+        status_message += f"快取報告數量: {cached_dates}\n"
+        
+        # 發送基本統計訊息
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=status_message)
+        )
+        
+        # 如果有失敗記錄，發送失敗詳情
+        failed_dates = CRAWL_STATS.get('failed_dates', {})
+        if failed_dates:
+            # 按日期排序
+            sorted_dates = sorted(failed_dates.keys(), reverse=True)
+            
+            # 分組顯示，避免訊息過長
+            chunks = [sorted_dates[i:i+5] for i in range(0, len(sorted_dates), 5)]
+            
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    fail_message = f"【失敗記錄】(共 {len(sorted_dates)} 個日期)\n\n"
+                else:
+                    fail_message = f"【失敗記錄 (續 {i+1}/{len(chunks)})】\n\n"
+                
+                for date_str in chunk:
+                    formatted_date = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:8]}"
+                    fail_message += f"日期: {formatted_date}\n"
+                    
+                    if 'fubon' in failed_dates[date_str]:
+                        fail_message += f"- 富邦期貨: {failed_dates[date_str]['fubon']}\n"
+                    
+                    if 'sinopac' in failed_dates[date_str]:
+                        fail_message += f"- 永豐期貨: {failed_dates[date_str]['sinopac']}\n"
+                    
+                    fail_message += "\n"
+                
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=fail_message)
+                )
+        
+        # 發送功能指引
+        help_message = (
+            "狀態管理命令：\n"
+            "1. 「盤後籌碼管理員-開始抓取歷史數據X9527」：開始抓取歷史數據\n"
+            "2. 「盤後籌碼-列表」：查看所有可用的報告日期\n"
+            "3. 「盤後籌碼-狀態」：查看爬取狀態統計"
+        )
+        
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=help_message)
+        )
+    
+    except Exception as e:
+        logger.error(f"顯示爬取狀態時出錯: {str(e)}")
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=f"顯示爬取狀態時出錯: {str(e)}")
+        )
+
 def get_available_dates():
     """
     獲取所有可用的報告日期
@@ -656,8 +1030,8 @@ def get_available_dates():
     # 從 pdf_files 目錄中獲取
     if os.path.exists("pdf_files"):
         for filename in os.listdir("pdf_files"):
-            if filename.startswith("fubon_") and filename.endswith(".pdf"):
-                date_str = filename[6:-4]  # 從 "fubon_YYYYMMDD.pdf" 提取日期
+            if (filename.startswith("fubon_") or filename.startswith("sinopac_")) and filename.endswith(".pdf"):
+                date_str = filename.split("_")[1].split(".")[0]  # 從 "type_YYYYMMDD.pdf" 提取日期
                 if date_str not in available_dates and len(date_str) == 8 and date_str.isdigit():
                     available_dates.append(date_str)
     
