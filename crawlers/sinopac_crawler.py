@@ -121,6 +121,9 @@ def extract_sinopac_report_data(pdf_path):
             for page in range(len(pdf_reader.pages)):
                 text += pdf_reader.pages[page].extract_text()
         
+        # 记录提取的文本（前1000字符）用于调试
+        logger.info(f"從永豐PDF提取的文本前1000字符: {text[:1000]}...")
+        
         # 初始化結果字典
         result = {
             'date': datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d'),
@@ -168,97 +171,283 @@ def extract_sinopac_report_data(pdf_path):
             'vix': 0
         }
         
-        # 提取加權指數數據
-        taiex_pattern = r"加權指數\s*(\d+\.\d+)\s*\S\s*(\d+\.\d+)\s*\(\s*(\d+\.\d+)%\)"
-        taiex_match = re.search(taiex_pattern, text)
-        if taiex_match:
-            result['taiex']['close'] = float(taiex_match.group(1))
-            result['taiex']['change'] = float(taiex_match.group(2))
-            result['taiex']['change_percent'] = float(taiex_match.group(3))
+        # 提取加權指數數據 - 尝试多种模式
+        taiex_patterns = [
+            r"加權指數\s*(\d+\.\d+)\s*\S\s*(\d+\.\d+)\s*\(\s*(\d+\.\d+)%\)",
+            r"加權指數[:\s]+(\d+[\.,]\d+)\s*[▲▼]*\s*(\d+[\.,]\d+)\s*\(\s*([+-]?\d+[\.,]\d+)%\)",
+            r"加權指數.*?(\d+\.\d+).*?(\d+\.\d+).*?(\d+\.\d+)%"
+        ]
         
-        # 提取三大法人買賣超
-        total_pattern = r"三大法人.*?(\+?-?\d+\.\d+)"
-        foreign_pattern = r"外資買賣超.*?(\+?-?\d+\.\d+)"
-        trust_pattern = r"投信買賣超.*?(\+?-?\d+\.\d+)"
-        dealer_pattern = r"自營買賣超.*?(\+?-?\d+\.\d+)"
+        for pattern in taiex_patterns:
+            taiex_match = re.search(pattern, text)
+            if taiex_match:
+                logger.info(f"匹配到加權指數模式: {pattern}")
+                logger.info(f"加權指數匹配值: {taiex_match.groups()}")
+                result['taiex']['close'] = float(taiex_match.group(1).replace(',', ''))
+                result['taiex']['change'] = float(taiex_match.group(2).replace(',', ''))
+                result['taiex']['change_percent'] = float(taiex_match.group(3).replace(',', ''))
+                break
         
-        total_match = re.search(total_pattern, text)
-        foreign_match = re.search(foreign_pattern, text)
-        trust_match = re.search(trust_pattern, text)
-        dealer_match = re.search(dealer_pattern, text)
+        # 提取三大法人買賣超 - 尝试多种模式
+        total_patterns = [
+            r"三大法人.*?(\+?-?\d+\.\d+)",
+            r"三大法人買賣超.*?(\+?-?\d+\.\d+)"
+        ]
         
-        if total_match:
-            result['institutional']['total'] = float(total_match.group(1).replace('+', ''))
-        if foreign_match:
-            result['institutional']['foreign'] = float(foreign_match.group(1).replace('+', ''))
-        if trust_match:
-            result['institutional']['investment_trust'] = float(trust_match.group(1).replace('+', ''))
-        if dealer_match:
-            result['institutional']['dealer'] = float(dealer_match.group(1).replace('+', ''))
+        foreign_patterns = [
+            r"外資買賣超.*?(\+?-?\d+\.\d+)",
+            r"外資.*?買賣超.*?(\+?-?\d+\.\d+)"
+        ]
         
-        # 提取期貨未平倉
-        foreign_oi_pattern = r"外資台指淨未平倉.*?(-?\d+)"
-        foreign_oi_change_pattern = r"外資台指淨未平倉增減.*?(-?\d+)"
+        trust_patterns = [
+            r"投信買賣超.*?(\+?-?\d+\.\d+)",
+            r"投信.*?買賣超.*?(\+?-?\d+\.\d+)"
+        ]
         
-        foreign_oi_match = re.search(foreign_oi_pattern, text)
-        foreign_oi_change_match = re.search(foreign_oi_change_pattern, text)
+        dealer_patterns = [
+            r"自營買賣超.*?(\+?-?\d+\.\d+)",
+            r"自營(商)?.*?買賣超.*?(\+?-?\d+\.\d+)"
+        ]
         
-        if foreign_oi_match:
-            result['futures']['foreign_oi'] = int(foreign_oi_match.group(1))
-        if foreign_oi_change_match:
-            result['futures']['foreign_oi_change'] = int(foreign_oi_change_match.group(1))
+        for pattern in total_patterns:
+            total_match = re.search(pattern, text)
+            if total_match:
+                logger.info(f"匹配到三大法人總計模式: {pattern}")
+                logger.info(f"三大法人總計匹配值: {total_match.groups()}")
+                result['institutional']['total'] = float(total_match.group(1).replace('+', '').replace(',', ''))
+                break
         
-        # 提取選擇權資料
-        call_oi_pattern = r"外資買權淨未平倉.*?(\d+)"
-        call_oi_change_pattern = r"外資買權淨未平倉增減.*?(-?\d+)"
-        put_oi_pattern = r"外資賣權淨未平倉.*?(\d+)"
-        put_oi_change_pattern = r"外資賣權淨未平倉增減.*?(-?\d+)"
+        for pattern in foreign_patterns:
+            foreign_match = re.search(pattern, text)
+            if foreign_match:
+                logger.info(f"匹配到外資模式: {pattern}")
+                logger.info(f"外資匹配值: {foreign_match.groups()}")
+                result['institutional']['foreign'] = float(foreign_match.group(1).replace('+', '').replace(',', ''))
+                break
         
-        call_oi_match = re.search(call_oi_pattern, text)
-        call_oi_change_match = re.search(call_oi_change_pattern, text)
-        put_oi_match = re.search(put_oi_pattern, text)
-        put_oi_change_match = re.search(put_oi_change_pattern, text)
+        for pattern in trust_patterns:
+            trust_match = re.search(pattern, text)
+            if trust_match:
+                logger.info(f"匹配到投信模式: {pattern}")
+                logger.info(f"投信匹配值: {trust_match.groups()}")
+                result['institutional']['investment_trust'] = float(trust_match.group(1).replace('+', '').replace(',', ''))
+                break
         
-        if call_oi_match:
-            result['options']['foreign_call_oi'] = int(call_oi_match.group(1))
-        if call_oi_change_match:
-            result['options']['foreign_call_oi_change'] = int(call_oi_change_match.group(1))
-        if put_oi_match:
-            result['options']['foreign_put_oi'] = int(put_oi_match.group(1))
-        if put_oi_change_match:
-            result['options']['foreign_put_oi_change'] = int(put_oi_change_match.group(1))
+        for pattern in dealer_patterns:
+            dealer_match = re.search(pattern, text)
+            if dealer_match:
+                logger.info(f"匹配到自營商模式: {pattern}")
+                val_index = 1 if len(dealer_match.groups()) == 1 else 2
+                logger.info(f"自營商匹配值: {dealer_match.groups()}")
+                result['institutional']['dealer'] = float(dealer_match.group(val_index).replace('+', '').replace(',', ''))
+                break
         
-        # 提取PC Ratio
-        pc_ratio_pattern = r"全市場Put/Call Ratio\s+(\d+\.\d+)%.*?(\d+\.\d+)%"
-        pc_ratio_match = re.search(pc_ratio_pattern, text)
-        if pc_ratio_match:
-            result['options']['pc_ratio'] = float(pc_ratio_match.group(1))
-            result['options']['pc_ratio_prev'] = float(pc_ratio_match.group(2))
+        # 提取期貨未平倉 - 尝试多种模式
+        foreign_oi_patterns = [
+            r"外資台指淨未平倉.*?(-?\d+)",
+            r"外資.*?未平倉.*?(-?\d+)"
+        ]
         
-        # 提取散戶多空比
-        retail_pattern = r"小台散戶多空比\s+(-?\d+\.\d+)%.*?(-?\d+\.\d+)%"
-        retail_match = re.search(retail_pattern, text)
-        if retail_match:
-            result['retail']['ratio'] = float(retail_match.group(1))
-            result['retail']['ratio_prev'] = float(retail_match.group(2))
+        foreign_oi_change_patterns = [
+            r"外資台指淨未平倉增減.*?(-?\d+)",
+            r"外資.*?未平倉增減.*?(-?\d+)"
+        ]
         
-        # 提取微台散戶多空比
-        xmtx_pattern = r"微台散戶多空比\s+(\+?-?\d+\.\d+)%.*?(\+?-?\d+\.\d+)%"
-        xmtx_match = re.search(xmtx_pattern, text)
-        if xmtx_match:
-            result['retail']['xmtx_ratio'] = float(xmtx_match.group(1).replace('+', ''))
-            result['retail']['xmtx_ratio_prev'] = float(xmtx_match.group(2).replace('+', ''))
+        for pattern in foreign_oi_patterns:
+            foreign_oi_match = re.search(pattern, text)
+            if foreign_oi_match:
+                logger.info(f"匹配到外資期貨未平倉模式: {pattern}")
+                logger.info(f"外資期貨未平倉匹配值: {foreign_oi_match.groups()}")
+                result['futures']['foreign_oi'] = int(foreign_oi_match.group(1).replace(',', ''))
+                break
         
-        # 提取VIX指標
-        vix_pattern = r"VIX指標\s+(\d+\.\d+)"
-        vix_match = re.search(vix_pattern, text)
-        if vix_match:
-            result['vix'] = float(vix_match.group(1))
+        for pattern in foreign_oi_change_patterns:
+            foreign_oi_change_match = re.search(pattern, text)
+            if foreign_oi_change_match:
+                logger.info(f"匹配到外資期貨未平倉增減模式: {pattern}")
+                logger.info(f"外資期貨未平倉增減匹配值: {foreign_oi_change_match.groups()}")
+                result['futures']['foreign_oi_change'] = int(foreign_oi_change_match.group(1).replace(',', ''))
+                break
         
+        # 提取選擇權資料 - 尝试多种模式
+        call_oi_patterns = [
+            r"外資買權淨未平倉.*?(\d+)",
+            r"外資買權.*?未平倉.*?(\d+)"
+        ]
+        
+        call_oi_change_patterns = [
+            r"外資買權淨未平倉增減.*?(-?\d+)",
+            r"外資買權.*?未平倉增減.*?(-?\d+)"
+        ]
+        
+        put_oi_patterns = [
+            r"外資賣權淨未平倉.*?(\d+)",
+            r"外資賣權.*?未平倉.*?(\d+)"
+        ]
+        
+        put_oi_change_patterns = [
+            r"外資賣權淨未平倉增減.*?(-?\d+)",
+            r"外資賣權.*?未平倉增減.*?(-?\d+)"
+        ]
+        
+        for pattern in call_oi_patterns:
+            call_oi_match = re.search(pattern, text)
+            if call_oi_match:
+                logger.info(f"匹配到外資買權未平倉模式: {pattern}")
+                logger.info(f"外資買權未平倉匹配值: {call_oi_match.groups()}")
+                result['options']['foreign_call_oi'] = int(call_oi_match.group(1).replace(',', ''))
+                break
+        
+        for pattern in call_oi_change_patterns:
+            call_oi_change_match = re.search(pattern, text)
+            if call_oi_change_match:
+                logger.info(f"匹配到外資買權未平倉增減模式: {pattern}")
+                logger.info(f"外資買權未平倉增減匹配值: {call_oi_change_match.groups()}")
+                result['options']['foreign_call_oi_change'] = int(call_oi_change_match.group(1).replace(',', ''))
+                break
+        
+        for pattern in put_oi_patterns:
+            put_oi_match = re.search(pattern, text)
+            if put_oi_match:
+                logger.info(f"匹配到外資賣權未平倉模式: {pattern}")
+                logger.info(f"外資賣權未平倉匹配值: {put_oi_match.groups()}")
+                result['options']['foreign_put_oi'] = int(put_oi_match.group(1).replace(',', ''))
+                break
+        
+        for pattern in put_oi_change_patterns:
+            put_oi_change_match = re.search(pattern, text)
+            if put_oi_change_match:
+                logger.info(f"匹配到外資賣權未平倉增減模式: {pattern}")
+                logger.info(f"外資賣權未平倉增減匹配值: {put_oi_change_match.groups()}")
+                result['options']['foreign_put_oi_change'] = int(put_oi_change_match.group(1).replace(',', ''))
+                break
+        
+        # 提取PC Ratio - 尝试多种模式
+        pc_ratio_patterns = [
+            r"全市場Put/Call Ratio\s+(\d+\.\d+)%.*?(\d+\.\d+)%",
+            r"全市場Put/Call Ratio.*?(\d+\.\d+)%.*?(\d+\.\d+)%",
+            r"Put/Call Ratio.*?(\d+\.\d+)%.*?(\d+\.\d+)%"
+        ]
+        
+        for pattern in pc_ratio_patterns:
+            pc_ratio_match = re.search(pattern, text)
+            if pc_ratio_match:
+                logger.info(f"匹配到PC Ratio模式: {pattern}")
+                logger.info(f"PC Ratio匹配值: {pc_ratio_match.groups()}")
+                result['options']['pc_ratio'] = float(pc_ratio_match.group(1).replace(',', ''))
+                result['options']['pc_ratio_prev'] = float(pc_ratio_match.group(2).replace(',', ''))
+                break
+        
+        # 提取散戶多空比 - 尝试多种模式
+        retail_patterns = [
+            r"小台散戶多空比\s+(-?\d+\.\d+)%.*?(-?\d+\.\d+)%",
+            r"小台散戶多空比.*?(\+?-?\d+\.\d+)%.*?(\+?-?\d+\.\d+)%",
+            r"小台散戶.*?(\+?-?\d+\.\d+)%.*?(\+?-?\d+\.\d+)%"
+        ]
+        
+        for pattern in retail_patterns:
+            retail_match = re.search(pattern, text)
+            if retail_match:
+                logger.info(f"匹配到散戶多空比模式: {pattern}")
+                logger.info(f"散戶多空比匹配值: {retail_match.groups()}")
+                result['retail']['ratio'] = float(retail_match.group(1).replace('+', '').replace(',', ''))
+                result['retail']['ratio_prev'] = float(retail_match.group(2).replace('+', '').replace(',', ''))
+                break
+        
+        # 提取微台散戶多空比 - 尝试多种模式
+        xmtx_patterns = [
+            r"微台散戶多空比\s+(\+?-?\d+\.\d+)%.*?(\+?-?\d+\.\d+)%",
+            r"微台散戶多空比.*?(\+?-?\d+\.\d+)%.*?(\+?-?\d+\.\d+)%",
+            r"微台散戶.*?(\+?-?\d+\.\d+)%.*?(\+?-?\d+\.\d+)%"
+        ]
+        
+        for pattern in xmtx_patterns:
+            xmtx_match = re.search(pattern, text)
+            if xmtx_match:
+                logger.info(f"匹配到微台散戶多空比模式: {pattern}")
+                logger.info(f"微台散戶多空比匹配值: {xmtx_match.groups()}")
+                result['retail']['xmtx_ratio'] = float(xmtx_match.group(1).replace('+', '').replace(',', ''))
+                result['retail']['xmtx_ratio_prev'] = float(xmtx_match.group(2).replace('+', '').replace(',', ''))
+                break
+        
+        # 提取VIX指標 - 尝试多种模式
+        vix_patterns = [
+            r"VIX指標\s+(\d+\.\d+)",
+            r"VIX指標.*?(\d+\.\d+)",
+            r"VIX.*?(\d+\.\d+)"
+        ]
+        
+        for pattern in vix_patterns:
+            vix_match = re.search(pattern, text)
+            if vix_match:
+                logger.info(f"匹配到VIX指標模式: {pattern}")
+                logger.info(f"VIX指標匹配值: {vix_match.groups()}")
+                result['vix'] = float(vix_match.group(1).replace(',', ''))
+                break
+        
+        # 尝试提取小台和微台的多空数量
+        retail_qty_patterns = [
+            r"小台散戶多單.*?(\d+).*?小台散戶空單.*?(\d+)",
+            r"小台.*?多單.*?(\d+).*?空單.*?(\d+)"
+        ]
+        
+        for pattern in retail_qty_patterns:
+            retail_qty_match = re.search(pattern, text)
+            if retail_qty_match:
+                logger.info(f"匹配到小台多空數量模式: {pattern}")
+                logger.info(f"小台多空數量匹配值: {retail_qty_match.groups()}")
+                result['retail']['mtx_long'] = int(retail_qty_match.group(1).replace(',', ''))
+                result['retail']['mtx_short'] = int(retail_qty_match.group(2).replace(',', ''))
+                break
+        
+        xmtx_qty_patterns = [
+            r"微台散戶多單.*?(\d+).*?微台散戶空單.*?(\d+)",
+            r"微台.*?多單.*?(\d+).*?空單.*?(\d+)"
+        ]
+        
+        for pattern in xmtx_qty_patterns:
+            xmtx_qty_match = re.search(pattern, text)
+            if xmtx_qty_match:
+                logger.info(f"匹配到微台多空數量模式: {pattern}")
+                logger.info(f"微台多空數量匹配值: {xmtx_qty_match.groups()}")
+                result['retail']['xmtx_long'] = int(xmtx_qty_match.group(1).replace(',', ''))
+                result['retail']['xmtx_short'] = int(xmtx_qty_match.group(2).replace(',', ''))
+                break
+        
+        # 检查是否成功提取关键数据
+        if (result['taiex']['close'] == 0 and result['futures']['foreign_oi'] == 0 and 
+            result['options']['foreign_call_oi'] == 0):
+            logger.warning("未能成功提取关键数据，可能模式匹配失败")
+            logger.warning("尝试使用替代方法解析PDF")
+            
+            # 尝试查找可能包含数据的行
+            lines = text.split('\n')
+            for line in lines:
+                # 查找加权指数行
+                if '加權指數' in line:
+                    logger.info(f"加權指數行: {line}")
+                    # 尝试提取数字
+                    numbers = re.findall(r'[+-]?\d+\.\d+', line)
+                    if len(numbers) >= 3:
+                        logger.info(f"從加權指數行提取到的數字: {numbers}")
+                        result['taiex']['close'] = float(numbers[0])
+                        result['taiex']['change'] = float(numbers[1])
+                        result['taiex']['change_percent'] = float(numbers[2])
+                
+                # 查找三大法人行
+                if '三大法人買賣超' in line:
+                    logger.info(f"三大法人行: {line}")
+                    # 尝试提取数字
+                    numbers = re.findall(r'[+-]?\d+\.\d+', line)
+                    if len(numbers) >= 1:
+                        logger.info(f"從三大法人行提取到的數字: {numbers}")
+                        result['institutional']['total'] = float(numbers[0])
+        
+        logger.info(f"永豐期貨報告解析結果: {result}")
         return result
     
     except Exception as e:
-        logger.error(f"解析永豐期貨報告時出錯: {str(e)}")
+        logger.error(f"解析永豐期貨報告時出錯: {str(e)}", exc_info=True)
         return None
 
 # 測試函數
