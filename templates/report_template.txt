@@ -1,0 +1,24 @@
+【期貨盤後籌碼快報】{date}
+
+加權指數：{taiex_close} {taiex_change_sign}{taiex_change_abs} ({taiex_change_percent}%)
+成交金額：{volume} 億
+
+三大法人買賣超：
+  合計：{inst_total:+.2f} 億
+  外資：{inst_foreign:+.2f} 億
+  投信：{inst_trust:+.2f} 億
+  自營：{inst_dealer:+.2f} 億
+
+外資期貨未平倉：{futures_foreign_oi} 口 ({futures_foreign_oi_change:+d})
+外資買權未平倉：{options_call_oi} 口 ({options_call_oi_change:+d})
+外資賣權未平倉：{options_put_oi} 口 ({options_put_oi_change:+d})
+
+散戶多空比：
+  小台：{retail_ratio:.2f}% (前一日：{retail_ratio_prev:.2f}%)
+  微台：{xmtx_ratio:.2f}% (前一日：{xmtx_ratio_prev:.2f}%)
+
+Put/Call Ratio：{pc_ratio:.2f}% (前一日：{pc_ratio_prev:.2f}%)
+VIX指標：{vix:.2f}
+
+資料來源：{sources}
+更新時間：{update_time}
