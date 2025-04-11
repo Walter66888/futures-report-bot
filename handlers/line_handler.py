@@ -4,13 +4,14 @@ LINE 訊息處理模組
 import os
 import re
 import logging
+import threading
 from datetime import datetime, timedelta
 import pytz
 from linebot.models import TextSendMessage
 from .report_handler import generate_report_text, get_latest_report_data, generate_specialized_report
 from crawlers.fubon_crawler import check_fubon_futures_report, extract_fubon_report_data
 from crawlers.sinopac_crawler import check_sinopac_futures_report, extract_sinopac_report_data
-from crawlers.utils import is_trading_day
+from crawlers.utils import is_trading_day, get_trading_days
 
 # 設定日誌
 logger = logging.getLogger(__name__)
@@ -33,8 +34,20 @@ MAIN_SECRET_COMMAND = "盤後籌碼2025"
 # 歷史查詢密語格式
 DATE_COMMAND_PATTERN = r"盤後籌碼-(\d{8})"
 
+# 管理員特殊命令 - 抓取歷史數據
+ADMIN_FETCH_COMMAND = "盤後籌碼管理員-開始抓取歷史數據X9527"
+
+# 查詢已抓取數據的命令
+LIST_AVAILABLE_COMMAND = "盤後籌碼-列表"
+
 # 報告快取，格式為 {'日期': {'fubon': {...}, 'sinopac': {...}, 'combined': {...}}}
 REPORT_CACHE = {}
+
+# 正在處理的日期請求
+PROCESSING_DATES = set()
+
+# 是否正在進行大規模歷史數據抓取
+IS_FETCHING_HISTORY = False
 
 def handle_line_message(line_bot_api, event, is_secret_command=False):
     """
@@ -65,6 +78,16 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
             logger.warning(f"未知的訊息來源類型: {event.source.type}")
             return
         
+        # 匹配管理員特殊命令 - 抓取歷史數據
+        if text == ADMIN_FETCH_COMMAND and is_private:
+            start_historical_fetch(line_bot_api, target_id)
+            return
+        
+        # 匹配查詢已抓取數據的命令
+        if text == LIST_AVAILABLE_COMMAND:
+            list_available_reports(line_bot_api, target_id)
+            return
+        
         # 處理密語指令 - 發送最新報告
         if is_secret_command or text == MAIN_SECRET_COMMAND:
             # 主密語 - 發送基本籌碼報告
@@ -84,18 +107,29 @@ def handle_line_message(line_bot_api, event, is_secret_command=False):
                 
                 # 檢查是否為有效的交易日
                 if not is_trading_day(query_date):
-                    line_bot_api.push_message(
-                        target_id,
+                    line_bot_api.reply_message(
+                        event.reply_token,
                         TextSendMessage(text=f"{query_date.strftime('%Y/%m/%d')} 不是交易日，無法查詢籌碼資料。")
                     )
                     return
                 
-                # 發送指定日期的報告
-                send_date_report(line_bot_api, target_id, query_date)
+                # 立即回覆，避免超時
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f"正在獲取 {query_date.strftime('%Y/%m/%d')} 的籌碼報告，請稍候...")
+                )
+                
+                # 在背景執行查詢，避免阻塞和超時
+                thread = threading.Thread(
+                    target=send_date_report_async,
+                    args=(line_bot_api, target_id, query_date),
+                    daemon=True
+                )
+                thread.start()
                 return
             except ValueError:
-                line_bot_api.push_message(
-                    target_id,
+                line_bot_api.reply_message(
+                    event.reply_token,
                     TextSendMessage(text="日期格式錯誤，請使用「盤後籌碼-YYYYMMDD」格式查詢，例如：盤後籌碼-20250410")
                 )
                 return
@@ -162,12 +196,26 @@ def send_latest_report(line_bot_api, target_id):
         report_data = get_latest_report_data()
         
         if not report_data:
-            # 告知用戶尚無最新報告，提供歷史查詢選項
-            message = (
-                "目前尚未有最新的籌碼報告可供查詢。\n\n"
-                "您可以使用「盤後籌碼-YYYYMMDD」格式查詢特定日期的報告，"
-                "例如：盤後籌碼-20250410"
-            )
+            # 檢查是否有最近的報告
+            available_dates = get_available_dates()
+            recent_date = get_most_recent_date(available_dates)
+            
+            if recent_date:
+                # 告知用戶尚無最新報告，但提供最近的報告
+                message = (
+                    "目前尚未有今日的籌碼報告。\n\n"
+                    f"最近的報告是 {recent_date[:4]}/{recent_date[4:6]}/{recent_date[6:8]} 的報告。\n"
+                    f"您可以輸入「盤後籌碼-{recent_date}」查看該日報告，\n"
+                    f"或輸入「盤後籌碼-列表」查看所有可用的報告日期。"
+                )
+            else:
+                # 告知用戶尚無任何報告
+                message = (
+                    "目前系統中尚未有任何籌碼報告。\n\n"
+                    "您可以使用「盤後籌碼-YYYYMMDD」格式查詢特定日期的報告，"
+                    "例如：盤後籌碼-20250410"
+                )
+            
             line_bot_api.push_message(
                 target_id,
                 TextSendMessage(text=message)
@@ -195,6 +243,45 @@ def send_latest_report(line_bot_api, target_id):
         except:
             pass
 
+def send_date_report_async(line_bot_api, target_id, query_date):
+    """
+    非同步發送指定日期的籌碼報告
+    
+    Args:
+        line_bot_api: LINE Bot API實例
+        target_id: 目標ID（用戶ID或群組ID）
+        query_date: 查詢日期（datetime對象）
+    """
+    try:
+        date_str = query_date.strftime('%Y%m%d')
+        
+        # 檢查是否已經在處理同一日期
+        if date_str in PROCESSING_DATES:
+            line_bot_api.push_message(
+                target_id,
+                TextSendMessage(text=f"已有另一個請求正在處理 {query_date.strftime('%Y/%m/%d')} 的報告，請稍候...")
+            )
+            return
+        
+        # 標記為正在處理
+        PROCESSING_DATES.add(date_str)
+        
+        try:
+            send_date_report(line_bot_api, target_id, query_date)
+        finally:
+            # 無論成功與否，都移除處理標記
+            PROCESSING_DATES.remove(date_str)
+    
+    except Exception as e:
+        logger.error(f"非同步發送歷史籌碼報告時出錯: {str(e)}")
+        try:
+            line_bot_api.push_message(
+                target_id,
+                TextSendMessage(text=f"處理 {query_date.strftime('%Y/%m/%d')} 的報告時出錯，請稍後再試。")
+            )
+        except:
+            pass
+
 def send_date_report(line_bot_api, target_id, query_date):
     """
     發送指定日期的籌碼報告
@@ -217,12 +304,6 @@ def send_date_report(line_bot_api, target_id, query_date):
                 TextSendMessage(text=report_text)
             )
             return
-        
-        # 通知用戶正在獲取報告
-        line_bot_api.push_message(
-            target_id,
-            TextSendMessage(text=f"正在獲取 {formatted_date} 的籌碼報告，請稍候...")
-        )
         
         # 構建檔案名稱
         year = date_str[:4]
@@ -258,8 +339,17 @@ def send_date_report(line_bot_api, target_id, query_date):
                     
                     # 解析數據
                     fubon_data = extract_fubon_report_data(fubon_pdf_path)
-            except:
-                logger.error(f"下載富邦期貨 {date_str} 報告失敗")
+                else:
+                    line_bot_api.push_message(
+                        target_id,
+                        TextSendMessage(text=f"無法從富邦期貨獲取 {formatted_date} 的報告 (狀態碼: {response.status_code})，嘗試其他來源...")
+                    )
+            except Exception as e:
+                logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}")
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=f"獲取富邦期貨 {formatted_date} 的報告時出錯，嘗試其他來源...")
+                )
         
         # 嘗試獲取永豐報告
         sinopac_data = None
@@ -268,9 +358,13 @@ def send_date_report(line_bot_api, target_id, query_date):
             # 如果已存在，直接解析
             sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
         else:
-            # 永豐的歷史報告需要從網頁爬取，比較複雜，這裡略過實現
-            # 如果需要完整實現，可以修改 check_sinopac_futures_report 函數，使其支持指定日期
-            pass
+            # 永豐的歷史報告需要從網頁爬取，比較複雜
+            # 這裡簡化處理，提示用戶只能獲取富邦數據
+            if not fubon_data:
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=f"無法獲取永豐期貨 {formatted_date} 的報告，此日期可能沒有可用的數據。")
+                )
         
         # 組合報告數據
         if fubon_data or sinopac_data:
@@ -303,7 +397,7 @@ def send_date_report(line_bot_api, target_id, query_date):
             # 如果沒有找到任何報告
             line_bot_api.push_message(
                 target_id,
-                TextSendMessage(text=f"抱歉，無法獲取 {formatted_date} 的籌碼報告。該日可能不是交易日，或報告尚未發布。")
+                TextSendMessage(text=f"抱歉，無法獲取 {formatted_date} 的籌碼報告。該日可能不是交易日，或報告尚未發布。\n\n您可以輸入「盤後籌碼-列表」查看所有可用的報告日期。")
             )
     
     except Exception as e:
@@ -315,6 +409,274 @@ def send_date_report(line_bot_api, target_id, query_date):
             )
         except:
             pass
+
+def start_historical_fetch(line_bot_api, target_id):
+    """
+    開始抓取歷史數據
+    
+    Args:
+        line_bot_api: LINE Bot API實例
+        target_id: 目標ID（用戶ID）
+    """
+    global IS_FETCHING_HISTORY
+    
+    if IS_FETCHING_HISTORY:
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text="已有歷史數據抓取任務正在進行中，請等待完成。")
+        )
+        return
+    
+    line_bot_api.push_message(
+        target_id,
+        TextSendMessage(text="開始抓取歷史數據，這可能需要一段時間，請耐心等待。抓取完成後將通知您。")
+    )
+    
+    # 在背景執行查詢，避免阻塞和超時
+    thread = threading.Thread(
+        target=fetch_historical_data_async,
+        args=(line_bot_api, target_id),
+        daemon=True
+    )
+    thread.start()
+
+def fetch_historical_data_async(line_bot_api, target_id):
+    """
+    非同步抓取歷史數據
+    
+    Args:
+        line_bot_api: LINE Bot API實例
+        target_id: 目標ID（用戶ID）
+    """
+    global IS_FETCHING_HISTORY
+    
+    try:
+        IS_FETCHING_HISTORY = True
+        
+        # 獲取最近3個月的交易日
+        end_date = datetime.now(TW_TIMEZONE)
+        start_date = end_date - timedelta(days=90)
+        trading_days = get_trading_days(start_date, end_date)
+        
+        total_days = len(trading_days)
+        processed_days = 0
+        success_days = 0
+        
+        # 每10個日期發送一次進度更新
+        progress_interval = max(1, total_days // 10)
+        
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=f"將抓取最近3個月的 {total_days} 個交易日數據...")
+        )
+        
+        for date in trading_days:
+            date_str = date.strftime('%Y%m%d')
+            
+            # 如果已有數據，則跳過
+            if date_str in REPORT_CACHE and REPORT_CACHE[date_str].get('combined'):
+                processed_days += 1
+                success_days += 1
+                continue
+            
+            try:
+                # 抓取該日期的報告
+                year = date_str[:4]
+                month = date_str[4:6]
+                day = date_str[6:8]
+                
+                # 嘗試獲取富邦報告
+                fubon_data = None
+                fubon_pdf_path = f"pdf_files/fubon_{date_str}.pdf"
+                if os.path.exists(fubon_pdf_path):
+                    # 如果已存在，直接解析
+                    fubon_data = extract_fubon_report_data(fubon_pdf_path)
+                else:
+                    # 嘗試下載該日期的報告
+                    pdf_filename = f"TWPM_{year}.{month}.{day}.pdf"
+                    base_url = "https://www.fubon.com/futures/wcm/home/taiwanaferhours/image/taiwanaferhours/"
+                    pdf_url = f"{base_url}{pdf_filename}"
+                    
+                    import requests
+                    try:
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        }
+                        response = requests.get(pdf_url, headers=headers, timeout=30)
+                        
+                        if response.status_code == 200 and response.headers.get('Content-Type', '').lower().startswith('application/pdf'):
+                            # 確保目錄存在
+                            os.makedirs("pdf_files", exist_ok=True)
+                            
+                            # 保存 PDF
+                            with open(fubon_pdf_path, 'wb') as f:
+                                f.write(response.content)
+                            
+                            # 解析數據
+                            fubon_data = extract_fubon_report_data(fubon_pdf_path)
+                    except Exception as e:
+                        logger.error(f"下載富邦期貨 {date_str} 報告失敗: {str(e)}")
+                
+                # 嘗試獲取永豐報告 (簡化處理，這裡不實際抓取永豐)
+                sinopac_data = None
+                sinopac_pdf_path = f"pdf_files/sinopac_{date_str}.pdf"
+                if os.path.exists(sinopac_pdf_path):
+                    # 如果已存在，直接解析
+                    sinopac_data = extract_sinopac_report_data(sinopac_pdf_path)
+                
+                # 組合報告數據
+                if fubon_data or sinopac_data:
+                    # 如果有任一報告數據，進行組合
+                    from .report_handler import combine_reports_data
+                    combined_data = combine_reports_data(fubon_data, sinopac_data)
+                    
+                    # 更新報告日期
+                    formatted_date = date.strftime('%Y/%m/%d')
+                    combined_data['date'] = formatted_date
+                    
+                    # 保存到快取
+                    REPORT_CACHE[date_str] = {
+                        'fubon': fubon_data,
+                        'sinopac': sinopac_data,
+                        'combined': combined_data,
+                        'last_update': datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S')
+                    }
+                    
+                    success_days += 1
+                
+                processed_days += 1
+                
+                # 每隔一定數量的日期發送進度更新
+                if processed_days % progress_interval == 0:
+                    line_bot_api.push_message(
+                        target_id,
+                        TextSendMessage(text=f"歷史數據抓取進度: {processed_days}/{total_days} ({processed_days/total_days*100:.1f}%)")
+                    )
+                
+                # 休息一下，避免請求過於頻繁
+                import time
+                time.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"抓取 {date_str} 的歷史數據時出錯: {str(e)}")
+                processed_days += 1
+        
+        # 發送完成消息
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=f"歷史數據抓取完成！成功獲取 {success_days}/{total_days} 個交易日的數據。\n\n您可以輸入「盤後籌碼-列表」查看所有可用的報告日期。")
+        )
+    
+    except Exception as e:
+        logger.error(f"抓取歷史數據時出錯: {str(e)}")
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=f"抓取歷史數據時發生錯誤: {str(e)}")
+        )
+    finally:
+        IS_FETCHING_HISTORY = False
+
+def list_available_reports(line_bot_api, target_id):
+    """
+    列出所有可用的報告日期
+    
+    Args:
+        line_bot_api: LINE Bot API實例
+        target_id: 目標ID（用戶ID或群組ID）
+    """
+    try:
+        available_dates = get_available_dates()
+        
+        if not available_dates:
+            line_bot_api.push_message(
+                target_id,
+                TextSendMessage(text="目前系統中沒有任何可用的籌碼報告。\n\n您可以使用「盤後籌碼管理員-開始抓取歷史數據X9527」命令來抓取歷史數據。")
+            )
+            return
+        
+        # 按日期排序
+        sorted_dates = sorted(available_dates, reverse=True)
+        
+        # 將日期格式化為更易讀的形式
+        formatted_dates = [f"{date[:4]}/{date[4:6]}/{date[6:8]}" for date in sorted_dates]
+        
+        # 分組顯示，避免訊息過長
+        chunks = [formatted_dates[i:i+15] for i in range(0, len(formatted_dates), 15)]
+        
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                header = f"系統中有 {len(formatted_dates)} 個日期的籌碼報告可供查詢：\n\n"
+                message = header + "\n".join(chunk)
+                if len(chunks) > 1:
+                    message += "\n\n(接續...)"
+            else:
+                message = f"可查詢日期 (續 {i+1}/{len(chunks)})：\n\n" + "\n".join(chunk)
+                if i < len(chunks) - 1:
+                    message += "\n\n(接續...)"
+            
+            line_bot_api.push_message(
+                target_id,
+                TextSendMessage(text=message)
+            )
+        
+        # 發送使用指引
+        usage_guide = (
+            "查詢指令使用說明：\n"
+            "1. 「盤後籌碼-YYYYMMDD」：查詢特定日期的報告\n"
+            "2. 「盤後籌碼2025」：查詢最新報告\n"
+            "3. 「期貨籌碼」、「選擇權籌碼」等：查詢特定類型的報告"
+        )
+        
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=usage_guide)
+        )
+    
+    except Exception as e:
+        logger.error(f"列出可用報告時出錯: {str(e)}")
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text="列出可用報告時出錯，請稍後再試。")
+        )
+
+def get_available_dates():
+    """
+    獲取所有可用的報告日期
+    
+    Returns:
+        list: 可用的報告日期列表
+    """
+    available_dates = []
+    
+    # 從快取中獲取
+    for date_str, data in REPORT_CACHE.items():
+        if data.get('combined'):
+            available_dates.append(date_str)
+    
+    # 從 pdf_files 目錄中獲取
+    if os.path.exists("pdf_files"):
+        for filename in os.listdir("pdf_files"):
+            if filename.startswith("fubon_") and filename.endswith(".pdf"):
+                date_str = filename[6:-4]  # 從 "fubon_YYYYMMDD.pdf" 提取日期
+                if date_str not in available_dates and len(date_str) == 8 and date_str.isdigit():
+                    available_dates.append(date_str)
+    
+    return available_dates
+
+def get_most_recent_date(dates):
+    """
+    獲取最近的日期
+    
+    Args:
+        dates: 日期字符串列表 (YYYYMMDD格式)
+        
+    Returns:
+        str: 最近的日期
+    """
+    if not dates:
+        return None
+    
+    return max(dates)
 
 def send_specialized_report(line_bot_api, target_id, report_type):
     """
@@ -330,16 +692,28 @@ def send_specialized_report(line_bot_api, target_id, report_type):
         report_data = get_latest_report_data()
         
         if not report_data:
-            message = (
-                f"目前尚未有最新的{COMMAND_MAPPING.get(report_type, '籌碼')}報告可供查詢。\n\n"
-                "您可以使用「盤後籌碼-YYYYMMDD」格式查詢特定日期的報告，"
-                "例如：盤後籌碼-20250410"
-            )
-            line_bot_api.push_message(
-                target_id,
-                TextSendMessage(text=message)
-            )
-            return
+            # 檢查是否有最近的報告
+            available_dates = get_available_dates()
+            recent_date = get_most_recent_date(available_dates)
+            
+            if recent_date and recent_date in REPORT_CACHE and REPORT_CACHE[recent_date].get('combined'):
+                # 使用最近的報告
+                report_data = REPORT_CACHE[recent_date]['combined']
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=f"注意：目前沒有最新報告，以下是 {recent_date[:4]}/{recent_date[4:6]}/{recent_date[6:8]} 的報告：")
+                )
+            else:
+                message = (
+                    f"目前尚未有{COMMAND_MAPPING.get(report_type, '籌碼')}報告可供查詢。\n\n"
+                    "您可以使用「盤後籌碼-YYYYMMDD」格式查詢特定日期的報告，"
+                    "或輸入「盤後籌碼-列表」查看所有可用的報告日期。"
+                )
+                line_bot_api.push_message(
+                    target_id,
+                    TextSendMessage(text=message)
+                )
+                return
         
         # 生成專門報告文字
         report_text = generate_specialized_report(report_data, report_type)
