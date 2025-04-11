@@ -214,3 +214,27 @@ def clean_text(text):
     text = text.strip()
     
     return text
+
+def get_trading_days(start_date, end_date):
+    """
+    獲取指定日期範圍內的交易日
+    
+    Args:
+        start_date: 開始日期
+        end_date: 結束日期
+        
+    Returns:
+        list: 交易日列表
+    """
+    import pandas as pd
+    
+    # 生成所有日期
+    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    
+    # 過濾掉週末
+    trading_days = [date.to_pydatetime() for date in all_dates if date.dayofweek < 5]
+    
+    # TODO: 這裡可以進一步過濾掉台灣的法定假日
+    # 需要一個假日列表或調用假日API
+    
+    return trading_days
