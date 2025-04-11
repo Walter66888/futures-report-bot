@@ -9,6 +9,7 @@ import random
 from datetime import datetime
 import pytz
 import threading
+from linebot.models import TextSendMessage
 
 from crawlers.fubon_crawler import check_fubon_futures_report, extract_fubon_report_data
 from crawlers.sinopac_crawler import check_sinopac_futures_report, extract_sinopac_report_data
@@ -87,7 +88,6 @@ def monitor_futures_reports(line_bot_api, group_id=None):
                     report_text = generate_report_text(combined_data)
                     
                     # 推送到LINE群組
-                    from handlers.line_handler import send_latest_report
                     try:
                         line_bot_api.push_message(
                             group_id,
@@ -142,6 +142,15 @@ def combine_reports_data(fubon_data, sinopac_data):
         base_data['taiex']['fubon'] = fubon_data.get('taiex', {})
         base_data['taiex']['sinopac'] = sinopac_data.get('taiex', {})
     
+    # 組合台指期貨數據
+    base_data['tx_futures'] = {
+        'close': sinopac_data.get('tx_futures', {}).get('close', fubon_data.get('tx_futures', {}).get('close', 0)),
+        'change': sinopac_data.get('tx_futures', {}).get('change', fubon_data.get('tx_futures', {}).get('change', 0)),
+        'change_percent': sinopac_data.get('tx_futures', {}).get('change_percent', fubon_data.get('tx_futures', {}).get('change_percent', 0)),
+        'bias': sinopac_data.get('tx_futures', {}).get('bias', fubon_data.get('tx_futures', {}).get('bias', 0)),
+        'volume': sinopac_data.get('tx_futures', {}).get('volume', fubon_data.get('tx_futures', {}).get('volume', 0)),
+    }
+    
     # 三大法人資料
     if fubon_data.get('institutional', {}).get('total') == sinopac_data.get('institutional', {}).get('total'):
         base_data['institutional'] = fubon_data['institutional']
@@ -149,6 +158,17 @@ def combine_reports_data(fubon_data, sinopac_data):
         # 若不同，記錄兩個來源的資料以供參考
         base_data['institutional']['fubon'] = fubon_data.get('institutional', {})
         base_data['institutional']['sinopac'] = sinopac_data.get('institutional', {})
+    
+    # 組合VIX相關數據
+    base_data['vix'] = fubon_data.get('vix', sinopac_data.get('vix', 0))
+    base_data['vix_prev'] = fubon_data.get('vix_prev', sinopac_data.get('vix_prev', 0))
+    
+    # 從報告中提取選擇權壓力支撐點位
+    base_data['options'] = base_data.get('options', {})
+    base_data['options']['max_call_oi_point'] = fubon_data.get('options', {}).get('max_call_oi_point', 
+                                              sinopac_data.get('options', {}).get('max_call_oi_point', 20000))
+    base_data['options']['max_put_oi_point'] = fubon_data.get('options', {}).get('max_put_oi_point', 
+                                             sinopac_data.get('options', {}).get('max_put_oi_point', 20000))
     
     # 組合來源資訊
     base_data['sources'] = ['富邦期貨', '永豐期貨']
@@ -179,29 +199,21 @@ def generate_report_text(report_data):
 
 【大盤數據】
 加權指數: {taiex_close} {taiex_change_sign}{taiex_change_abs} ({taiex_change_percent}%)
+台指期近月: {tx_close} {tx_change_sign}{tx_change_abs} ({tx_change_percent}%)
+台指期現貨價差: {tx_bias:+.2f}
 成交金額: {volume} 億元
 
 【三大法人買賣超】
-三大法人: {inst_total:+.2f} 億元
-外資: {inst_foreign:+.2f} 億元
-投信: {inst_trust:+.2f} 億元
-自營商: {inst_dealer:+.2f} 億元
+三大法人: {inst_total:+.2f} 億元 ({inst_total_change:+.2f})
+外資: {inst_foreign:+.2f} 億元 ({inst_foreign_change:+.2f})
+投信: {inst_trust:+.2f} 億元 ({inst_trust_change:+.2f})
+自營商: {inst_dealer:+.2f} 億元 ({inst_dealer_change:+.2f})
 
 【期貨未平倉】
-三大法人台指期未平倉: {futures_three_insti_oi:+d} 口
-三大法人台指期未平倉增減: {futures_three_insti_oi_change:+d} 口
-外資台指期未平倉: {futures_foreign_oi:+d} 口
-外資台指期未平倉增減: {futures_foreign_oi_change:+d} 口
-投信台指期未平倉: {futures_trust_oi:+d} 口
-投信台指期未平倉增減: {futures_trust_oi_change:+d} 口
-自營商台指期未平倉: {futures_dealer_oi:+d} 口
-自營商台指期未平倉增減: {futures_dealer_oi_change:+d} 口
-
-【選擇權未平倉】
-外資買權未平倉: {options_call_oi:+d} 口
-外資買權未平倉增減: {options_call_oi_change:+d} 口
-外資賣權未平倉: {options_put_oi:+d} 口
-外資賣權未平倉增減: {options_put_oi_change:+d} 口
+三大法人台指期未平倉: {futures_three_insti_oi:+d} 口 ({futures_three_insti_oi_change:+d})
+外資台指期未平倉: {futures_foreign_oi:+d} 口 ({futures_foreign_oi_change:+d})
+投信台指期未平倉: {futures_trust_oi:+d} 口 ({futures_trust_oi_change:+d})
+自營商台指期未平倉: {futures_dealer_oi:+d} 口 ({futures_dealer_oi_change:+d})
 
 【散戶指標】
 小台散戶多空比: {retail_ratio:.2f}% (前日: {retail_ratio_prev:.2f}%)
@@ -213,7 +225,9 @@ def generate_report_text(report_data):
 
 【其他指標】
 Put/Call Ratio: {pc_ratio:.2f}% (前日: {pc_ratio_prev:.2f}%)
-VIX指標: {vix:.2f}
+VIX指標: {vix:.2f} (前日: {vix_prev:.2f})
+選擇權買權最大未平倉: {max_call_oi_point} 點
+選擇權賣權最大未平倉: {max_put_oi_point} 點
 
 【資料來源】
 {sources}
@@ -223,6 +237,11 @@ VIX指標: {vix:.2f}
     taiex_change = report_data.get('taiex', {}).get('change', 0)
     taiex_change_sign = '▲' if taiex_change > 0 else '▼' if taiex_change < 0 else ''
     taiex_change_abs = abs(taiex_change)
+    
+    # 處理台指期漲跌符號
+    tx_change = report_data.get('tx_futures', {}).get('change', 0)
+    tx_change_sign = '▲' if tx_change > 0 else '▼' if tx_change < 0 else ''
+    tx_change_abs = abs(tx_change)
     
     # 從報告數據中取得期貨數值
     futures = report_data.get('futures', {})
@@ -249,13 +268,22 @@ VIX指標: {vix:.2f}
         taiex_change_sign=taiex_change_sign,
         taiex_change_abs=taiex_change_abs,
         taiex_change_percent=abs(report_data.get('taiex', {}).get('change_percent', 0)),
+        tx_close=report_data.get('tx_futures', {}).get('close', 0),
+        tx_change_sign=tx_change_sign,
+        tx_change_abs=tx_change_abs,
+        tx_change_percent=abs(report_data.get('tx_futures', {}).get('change_percent', 0)),
+        tx_bias=report_data.get('tx_futures', {}).get('bias', 0),
         volume=report_data.get('taiex', {}).get('volume', 0),
         
         # 三大法人買賣超
         inst_total=report_data.get('institutional', {}).get('total', 0),
+        inst_total_change=report_data.get('institutional', {}).get('total_change', 0),
         inst_foreign=report_data.get('institutional', {}).get('foreign', 0),
+        inst_foreign_change=report_data.get('institutional', {}).get('foreign_change', 0),
         inst_trust=report_data.get('institutional', {}).get('investment_trust', 0),
+        inst_trust_change=report_data.get('institutional', {}).get('investment_trust_change', 0),
         inst_dealer=report_data.get('institutional', {}).get('dealer', 0),
+        inst_dealer_change=report_data.get('institutional', {}).get('dealer_change', 0),
         
         # 期貨未平倉
         futures_three_insti_oi=futures_three_insti_oi,
@@ -267,26 +295,23 @@ VIX指標: {vix:.2f}
         futures_dealer_oi=futures.get('dealer_oi', 0),
         futures_dealer_oi_change=futures.get('dealer_oi_change', 0),
         
-        # 選擇權未平倉
-        options_call_oi=report_data.get('options', {}).get('foreign_call_oi', 0),
-        options_call_oi_change=report_data.get('options', {}).get('foreign_call_oi_change', 0),
-        options_put_oi=report_data.get('options', {}).get('foreign_put_oi', 0),
-        options_put_oi_change=report_data.get('options', {}).get('foreign_put_oi_change', 0),
-        
         # 散戶指標
         retail_ratio=report_data.get('retail', {}).get('ratio', 0),
         retail_ratio_prev=report_data.get('retail', {}).get('ratio_prev', 0),
-        retail_long=report_data.get('retail', {}).get('long', 0) if 'long' in report_data.get('retail', {}) else 25403,  # 範例值從PDF
-        retail_short=report_data.get('retail', {}).get('short', 0) if 'short' in report_data.get('retail', {}) else 26085,  # 範例值從PDF
+        retail_long=report_data.get('retail', {}).get('long', 25403),  # 範例值從PDF
+        retail_short=report_data.get('retail', {}).get('short', 26085),  # 範例值從PDF
         xmtx_ratio=report_data.get('retail', {}).get('xmtx_ratio', 0),
         xmtx_ratio_prev=report_data.get('retail', {}).get('xmtx_ratio_prev', 0),
-        xmtx_long=report_data.get('retail', {}).get('xmtx_long', 0) if 'xmtx_long' in report_data.get('retail', {}) else 31047,  # 範例值從PDF
-        xmtx_short=report_data.get('retail', {}).get('xmtx_short', 0) if 'xmtx_short' in report_data.get('retail', {}) else 27249,  # 範例值從PDF
+        xmtx_long=report_data.get('retail', {}).get('xmtx_long', 31047),  # 範例值從PDF
+        xmtx_short=report_data.get('retail', {}).get('xmtx_short', 27249),  # 範例值從PDF
         
         # 其他指標
         pc_ratio=report_data.get('options', {}).get('pc_ratio', 0),
         pc_ratio_prev=report_data.get('options', {}).get('pc_ratio_prev', 0),
         vix=report_data.get('vix', 0),
+        vix_prev=report_data.get('vix_prev', 0),
+        max_call_oi_point=report_data.get('options', {}).get('max_call_oi_point', 20000),
+        max_put_oi_point=report_data.get('options', {}).get('max_put_oi_point', 20000),
         
         # 來源與更新時間
         sources=', '.join(report_data.get('sources', ['富邦期貨', '永豐期貨'])),
@@ -294,6 +319,26 @@ VIX指標: {vix:.2f}
     )
     
     return report_text
+
+def get_latest_report_data():
+    """
+    獲取最新的報告資料
+    
+    Returns:
+        dict: 最新報告資料
+    """
+    # 如果已有組合報告，優先返回
+    if LATEST_REPORT['combined']:
+        return LATEST_REPORT['combined']
+    
+    # 如果富邦和永豐都有，嘗試組合
+    if LATEST_REPORT['fubon'] and LATEST_REPORT['sinopac']:
+        combined_data = combine_reports_data(LATEST_REPORT['fubon'], LATEST_REPORT['sinopac'])
+        LATEST_REPORT['combined'] = combined_data
+        return combined_data
+    
+    # 否則返回任一可用的報告
+    return LATEST_REPORT['fubon'] or LATEST_REPORT['sinopac']
 
 def generate_specialized_report(report_data, report_type):
     """
@@ -796,24 +841,70 @@ def generate_full_report(report_data, template):
         taiex_change_sign=taiex_change_sign,
         taiex_change_abs=taiex_change_abs,
         taiex_change_percent=abs(report_data.get('taiex', {}).get('change_percent', 0)),
-        tx_close=report_data.get('tx_futures', {
-
-def get_latest_report_data():
-    """
-    獲取最新的報告資料
-    
-    Returns:
-        dict: 最新報告資料
-    """
-    # 如果已有組合報告，優先返回
-    if LATEST_REPORT['combined']:
-        return LATEST_REPORT['combined']
-    
-    # 如果富邦和永豐都有，嘗試組合
-    if LATEST_REPORT['fubon'] and LATEST_REPORT['sinopac']:
-        combined_data = combine_reports_data(LATEST_REPORT['fubon'], LATEST_REPORT['sinopac'])
-        LATEST_REPORT['combined'] = combined_data
-        return combined_data
-    
-   # 否則返回任一可用的報告
-    return LATEST_REPORT['fubon'] or LATEST_REPORT['sinopac']
+        tx_close=report_data.get('tx_futures', {}).get('close', 0),
+        tx_change_sign=tx_change_sign,
+        tx_change_abs=tx_change_abs,
+        tx_change_percent=abs(report_data.get('tx_futures', {}).get('change_percent', 0)),
+        tx_bias=report_data.get('tx_futures', {}).get('bias', 0),
+        volume=report_data.get('taiex', {}).get('volume', 0),
+        
+        # 三大法人買賣超
+        inst_total=report_data.get('institutional', {}).get('total', 0),
+        inst_total_change=report_data.get('institutional', {}).get('total_change', 0),
+        inst_foreign=report_data.get('institutional', {}).get('foreign', 0),
+        inst_foreign_change=report_data.get('institutional', {}).get('foreign_change', 0),
+        inst_trust=report_data.get('institutional', {}).get('investment_trust', 0),
+        inst_trust_change=report_data.get('institutional', {}).get('investment_trust_change', 0),
+        inst_dealer=report_data.get('institutional', {}).get('dealer', 0),
+        inst_dealer_change=report_data.get('institutional', {}).get('dealer_change', 0),
+        
+        # 期貨未平倉
+        futures_three_insti_oi=futures_three_insti_oi,
+        futures_three_insti_oi_change=futures_three_insti_oi_change,
+        futures_foreign_oi=futures.get('foreign_oi', 0),
+        futures_foreign_oi_change=futures.get('foreign_oi_change', 0),
+        futures_trust_oi=futures.get('trust_oi', 0) if 'trust_oi' in futures else futures.get('investment_trust_oi', 0),
+        futures_trust_oi_change=futures.get('trust_oi_change', 0) if 'trust_oi_change' in futures else futures.get('investment_trust_oi_change', 0),
+        futures_dealer_oi=futures.get('dealer_oi', 0),
+        futures_dealer_oi_change=futures.get('dealer_oi_change', 0),
+        
+        # 選擇權數據
+        pc_ratio=options.get('pc_ratio', 0),
+        pc_ratio_prev=options.get('pc_ratio_prev', 0),
+        max_call_oi_point=options.get('max_call_oi_point', 0),
+        max_call_oi=options.get('max_call_oi', 0),
+        max_put_oi_point=options.get('max_put_oi_point', 0),
+        max_put_oi=options.get('max_put_oi', 0),
+        foreign_call_oi=options.get('foreign_call_oi', 0),
+        foreign_call_oi_change=options.get('foreign_call_oi_change', 0),
+        foreign_put_oi=options.get('foreign_put_oi', 0),
+        foreign_put_oi_change=options.get('foreign_put_oi_change', 0),
+        
+        # 散戶指標
+        retail_ratio=report_data.get('retail', {}).get('ratio', 0),
+        retail_ratio_prev=report_data.get('retail', {}).get('ratio_prev', 0),
+        xmtx_ratio=report_data.get('retail', {}).get('xmtx_ratio', 0),
+        xmtx_ratio_prev=report_data.get('retail', {}).get('xmtx_ratio_prev', 0),
+        
+        # 市場恐慌指標
+        vix=report_data.get('vix', 0),
+        vix_prev=report_data.get('vix_prev', 0),
+        implied_volatility=options.get('implied_volatility', 0),
+        
+        # 市場關鍵壓力支撐
+        weekly_resistance=weekly_resistance,
+        weekly_support=weekly_support,
+        monthly_resistance=monthly_resistance,
+        monthly_support=monthly_support,
+        
+        # 技術分析
+        short_term_trend=short_term_trend,
+        medium_term_trend=medium_term_trend,
+        long_term_trend=long_term_trend,
+        market_position=market_position,
+        target_range=target_range,
+        
+        # 來源與更新時間
+        sources=', '.join(report_data.get('sources', ['富邦期貨', '永豐期貨'])),
+        update_time=report_data.get('last_update', datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S'))
+    )
