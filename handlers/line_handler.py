@@ -3,7 +3,7 @@ LINE 訊息處理模組
 """
 import os
 import logging
-from linebot.models import TextSendMessage, ImageSendMessage
+from linebot.models import TextSendMessage
 from .report_handler import generate_report_text, get_latest_report_data
 
 # 設定日誌
@@ -77,74 +77,6 @@ def send_latest_report(line_bot_api, target_id):
             line_bot_api.push_message(
                 target_id,
                 TextSendMessage(text="發送報告時出錯，請稍後再試。")
-            )
-        except:
-            pass
-
-def send_pdf_to_line(line_bot_api, target_id, pdf_path, title):
-    """
-    將PDF轉為圖片發送至LINE
-    
-    Args:
-        line_bot_api: LINE Bot API實例
-        target_id: 目標ID
-        pdf_path: PDF檔案路徑
-        title: 標題
-    """
-    try:
-        from crawlers.utils import convert_pdf_to_images
-        
-        # 轉換PDF為圖片
-        images = convert_pdf_to_images(pdf_path)
-        
-        if not images:
-            line_bot_api.push_message(
-                target_id,
-                TextSendMessage(text=f"無法處理PDF: {title}")
-            )
-            return
-        
-        # 先發送標題
-        line_bot_api.push_message(
-            target_id,
-            TextSendMessage(text=f"【{title}】已更新")
-        )
-        
-        # 發送所有圖片
-        for i, image in enumerate(images):
-            # 保存臨時圖片
-            temp_path = f"temp_img_{i}.jpg"
-            image.save(temp_path, "JPEG")
-            
-            # 上傳圖片並發送
-            with open(temp_path, 'rb') as f:
-                file_content = f.read()
-            
-            # 因LINE有檔案大小限制，可能需要調整圖片大小
-            # 這裡假設圖片大小合適，實際使用時需要檢查
-            
-            # 使用push_message發送圖片
-            # 注意：這裡需要提供可公開訪問的URL，LINE Bot有免費的方法可以上傳圖片
-            # 實際實作時需要替換成真實的URL服務
-            line_bot_api.push_message(
-                target_id,
-                ImageSendMessage(
-                    original_content_url="https://example.com/image.jpg",  # 替換為實際URL
-                    preview_image_url="https://example.com/image.jpg"  # 替換為實際URL
-                )
-            )
-            
-            # 刪除臨時檔案
-            os.remove(temp_path)
-        
-        logger.info(f"成功發送PDF圖片給目標: {target_id}")
-    
-    except Exception as e:
-        logger.error(f"發送PDF圖片時出錯: {str(e)}")
-        try:
-            line_bot_api.push_message(
-                target_id,
-                TextSendMessage(text=f"發送PDF圖片時出錯: {title}")
             )
         except:
             pass
