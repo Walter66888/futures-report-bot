@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虛擬環境
+venv/
+ENV/
+env/
+
+# 日誌檔案
+*.log
+
+# 環境變數
+.env
+
+# PDF檔案及臨時檔案
+pdf_files/
+temp_img_*.jpg
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# 系統檔案
+.DS_Store
+Thumbs.db
