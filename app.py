@@ -36,6 +36,39 @@ TW_TIMEZONE = pytz.timezone('Asia/Taipei')
 
 app = Flask(__name__)
 
+logger = logging.getLogger(__name__)
+
+@app.route("/test-permissions", methods=['GET'])
+def test_permissions():
+    """測試檔案系統權限"""
+    results = {}
+    
+    # 測試 pdf_files 目錄
+    try:
+        os.makedirs("pdf_files", exist_ok=True)
+        test_file_path = "pdf_files/permission_test.txt"
+        with open(test_file_path, 'w') as f:
+            f.write("權限測試")
+        with open(test_file_path, 'r') as f:
+            content = f.read()
+        os.remove(test_file_path)
+        results["pdf_files"] = "成功 (建立、寫入、讀取和刪除)"
+    except Exception as e:
+        results["pdf_files"] = f"失敗: {str(e)}"
+    
+    # 測試 report_cache.json
+    try:
+        with open("report_cache.json", 'w') as f:
+            f.write('{"test": true}')
+        with open("report_cache.json", 'r') as f:
+            content = f.read()
+        results["report_cache.json"] = "成功 (寫入和讀取)"
+    except Exception as e:
+        results["report_cache.json"] = f"失敗: {str(e)}"
+    
+    logger.info(f"檔案系統權限測試結果: {results}")
+    return str(results)
+
 # LINE Bot 設定
 try:
     line_bot_api = LineBotApi(os.environ.get('LINE_CHANNEL_ACCESS_TOKEN'))
