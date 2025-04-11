@@ -69,10 +69,37 @@ def test_permissions():
     logger.info(f"檔案系統權限測試結果: {results}")
     return str(results)
 
+@app.route("/test-cache", methods=['GET'])
+def test_cache():
+    """測試緩存讀寫"""
+    try:
+        from datetime import datetime
+        import json
+        import pytz
+        
+        TW_TIMEZONE = pytz.timezone('Asia/Taipei')
+        CACHE_FILE = "report_cache.json"
+        
+        # 嘗試寫入緩存
+        test_data = {"test": "data", "timestamp": datetime.now(TW_TIMEZONE).strftime('%Y/%m/%d %H:%M:%S')}
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(test_data, f, ensure_ascii=False)
+        
+        # 嘗試讀取緩存
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                read_data = json.load(f)
+            return f"緩存讀寫測試成功。寫入: {test_data}, 讀取: {read_data}"
+        else:
+            return "緩存寫入成功但無法找到文件"
+    except Exception as e:
+        return f"測試緩存時出錯: {str(e)}"
+
 # LINE Bot 設定
 try:
     line_bot_api = LineBotApi(os.environ.get('LINE_CHANNEL_ACCESS_TOKEN'))
     handler = WebhookHandler(os.environ.get('LINE_CHANNEL_SECRET'))
+    logger.info("LINE Bot 初始化成功")
 except Exception as e:
     logger.error(f"LINE Bot 初始化錯誤: {str(e)}")
     # 在開發環境中，使用假的 LINE Bot API
@@ -120,13 +147,32 @@ def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
     
+    logger.info(f"收到來自 {user_id} 的訊息: {text}")
+    
     # 判斷是否為私人訊息和密語
     if event.source.type == 'user' and text == SECRET_COMMAND:
+        logger.info(f"檢測到密語命令: {text}")
         handle_line_message(line_bot_api, event, is_secret_command=True)
     else:
-        # 其他訊息處理，在開發階段可用於測試
-        if os.environ.get('FLASK_ENV') == 'development':
+        # 嘗試匹配歷史日期查詢
+        import re
+        from handlers.line_handler import DATE_COMMAND_PATTERN
+        date_match = re.match(DATE_COMMAND_PATTERN, text)
+        if date_match:
+            date_str = date_match.group(1)
+            logger.info(f"檢測到歷史日期查詢: {date_str}")
             handle_line_message(line_bot_api, event)
+        # 其他訊息處理，在開發階段可用於測試
+        elif os.environ.get('FLASK_ENV') == 'development':
+            handle_line_message(line_bot_api, event)
+        else:
+            # 檢查是否包含其他密語關鍵字
+            from handlers.line_handler import COMMAND_MAPPING
+            for cmd in COMMAND_MAPPING.keys():
+                if cmd in text:
+                    logger.info(f"檢測到專門報告關鍵字: {cmd}")
+                    handle_line_message(line_bot_api, event)
+                    break
 
 @app.route("/", methods=['GET'])
 def index():
